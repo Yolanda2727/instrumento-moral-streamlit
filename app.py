@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -11,15 +13,22 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
+from admin_reports import load_admin_report_store
+from analysis_module import (
+    argumentative_pattern_table,
+    automatic_interpretive_synthesis,
+    build_quantitative_report,
+    clean_text_series,
+    cluster_thematic_justifications,
+    extract_keywords_by_group,
+    profession_interpretive_trends,
+)
+from persistence import COLUMNS, load_persistence_store
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfVectorizer
-
-try:
-    import portalocker
-except Exception:  # pragma: no cover
-    portalocker = None
 
 # =========================
 # Configuración general
@@ -40,6 +49,7 @@ APP_SUBTITLE = (
 )
 DEFAULT_ROUTE_SIZE = 6
 MIN_JUSTIFICATION_CHARS = 25
+ADMIN_SESSION_KEY = "admin_authenticated"
 AUTHOR_NAME = "Profesor Anderson Díaz Pérez"
 AUTHOR_CREDENTIALS = [
     "Doctor en Bioética",
@@ -59,9 +69,11 @@ PROGRAM_OBJECTIVES = [
     "Consolidar visualizaciones colectivas útiles para análisis académico, formación ética e investigación educativa exploratoria.",
 ]
 
-DATA_PATH = Path(os.getenv("MORAL_TEST_DATA_PATH", "data/responses.csv"))
-LOCK_PATH = DATA_PATH.with_suffix(".lock")
+LEGACY_CSV_PATH = Path(os.getenv("MORAL_TEST_LEGACY_CSV_PATH", os.getenv("MORAL_TEST_DATA_PATH", "data/responses.csv")))
+SQLITE_PATH = Path(os.getenv("MORAL_TEST_SQLITE_PATH", "data/responses.db"))
 EXPORT_DIR = Path("data/exports")
+PERSISTENCE_STORE = load_persistence_store(sqlite_path=SQLITE_PATH, legacy_csv_path=LEGACY_CSV_PATH)
+ADMIN_REPORT_STORE = load_admin_report_store()
 
 BASE_STOPWORDS = {
     "de", "la", "el", "en", "y", "a", "los", "las", "un", "una", "para", "por", "con",
@@ -72,13 +84,27 @@ BASE_STOPWORDS = {
     "contra", "todo", "toda", "todos", "todas", "uno", "dos", "tres", "pero", "también",
 }
 
-COLUMNS = [
-    "timestamp", "anon_id", "student_id", "name", "profession", "years_experience", "group",
-    "row_type", "item_id", "sub_id", "choice_key", "choice_stage", "choice_level", "choice_framework",
-    "likert_value", "text",
-]
-
 FRAMEWORKS = ["utilitarismo", "deontologia", "regla_de_oro", "virtudes", "contrato_social", "cuidado"]
+FRAMEWORK_LABELS = {
+    "utilitarismo": "Utilitarismo",
+    "deontologia": "Deontología",
+    "regla_de_oro": "Regla de oro",
+    "virtudes": "Ética de virtudes",
+    "contrato_social": "Contrato social",
+    "cuidado": "Ética del cuidado",
+}
+ACADEMIC_COLOR_SEQUENCE = ["#0B1F3A", "#1C5F8D", "#2E8A99", "#C08A2B", "#7C5430", "#4F6D7A", "#8F3B3B"]
+PLOTLY_EXPORT_CONFIG = {
+    "displaylogo": False,
+    "responsive": True,
+    "toImageButtonOptions": {
+        "format": "png",
+        "filename": "instrumento_moral",
+        "height": 720,
+        "width": 1280,
+        "scale": 2,
+    },
+}
 
 FRAMEWORK_INVENTORY = [
     ("F_U1", "utilitarismo", "Lo correcto es maximizar el bienestar total, aunque alguien salga perjudicado."),
@@ -110,8 +136,22 @@ def opt(key: str, text: str, stage: int, framework: str) -> dict:
     return {"key": key, "text": text, "stage": stage, "level": level, "framework": framework}
 
 
-def make_dilemma(item_id: str, title: str, prompt: str, options: List[dict], stage_statements: Dict[int, str]) -> dict:
-    return {"id": item_id, "title": title, "prompt": prompt, "options": options, "stage_statements": stage_statements}
+def make_dilemma(
+    item_id: str,
+    title: str,
+    prompt: str,
+    options: List[dict],
+    stage_statements: Dict[int, str],
+    pedagogical_justification: str = "",
+) -> dict:
+    return {
+        "id": item_id,
+        "title": title,
+        "prompt": prompt,
+        "options": options,
+        "stage_statements": stage_statements,
+        "pedagogical_justification": pedagogical_justification,
+    }
 
 
 BANK: List[dict] = []
@@ -346,55 +386,283 @@ it_cases = [
     ]),
 ]
 
+lab_cases = [
+    (
+        "BM1",
+        "Bioseguridad en cabina y exposición ocupacional",
+        "Durante el procesamiento de una muestra respiratoria con sospecha de tuberculosis, un compañero propone abrir el contenedor fuera de la cabina para ganar tiempo, aunque eso rompe el protocolo y aumenta el riesgo de aerosolización. ¿Qué haces?",
+        [
+            opt("A", "Acepto para no retrasar el turno ni tener problemas con el coordinador.", 1, "utilitarismo"),
+            opt("B", "Acepto si así el laboratorio libera resultados más rápido para varios pacientes.", 2, "utilitarismo"),
+            opt("C", "Le pido que no lo haga porque nadie querría exponerse de esa manera.", 3, "regla_de_oro"),
+            opt("D", "Detengo el procedimiento y exijo cumplir la bioseguridad y el uso de cabina certificada.", 4, "deontologia"),
+            opt("E", "Escalo el incidente, documento el riesgo y reviso condiciones del proceso con el equipo.", 5, "contrato_social"),
+            opt("F", "Protejo la vida del personal y de terceros aunque eso implique confrontar la presión operativa.", 6, "virtudes"),
+        ],
+        "Fortalece la deliberación sobre deberes de bioseguridad, protección mutua y liderazgo prudente frente a prácticas inseguras normalizadas.",
+    ),
+    (
+        "BM2",
+        "Transporte de muestras y error preanalítico",
+        "Una muestra para hemocultivo llega sin cadena de frío documentada y con demora significativa en el transporte. El servicio clínico presiona para procesarla sin observaciones porque el paciente está inestable. ¿Cómo procedes?",
+        [
+            opt("A", "La proceso sin decir nada para evitar conflicto con el servicio solicitante.", 1, "utilitarismo"),
+            opt("B", "La proceso y omito la novedad si eso agiliza una decisión terapéutica.", 2, "utilitarismo"),
+            opt("C", "Llamo al servicio y explico el problema pensando en cómo me gustaría que manejaran una muestra mía.", 3, "cuidado"),
+            opt("D", "Registro la no conformidad y sigo el protocolo preanalítico antes de liberar cualquier interpretación.", 4, "deontologia"),
+            opt("E", "Coordino una nueva toma o una liberación condicionada con trazabilidad y justificación compartida.", 5, "contrato_social"),
+            opt("F", "Priorizo veracidad analítica y no maleficencia: un dato dudoso no debe disfrazarse de certeza.", 6, "virtudes"),
+        ],
+        "Permite discutir calidad preanalítica, trazabilidad y el equilibrio entre urgencia clínica y validez técnica del resultado.",
+    ),
+    (
+        "BM3",
+        "Contaminación cruzada entre cultivos",
+        "Detectas que una placa pudo contaminarse al manipularse muy cerca de otra muestra positiva de alto impacto epidemiológico. Si repites el procedimiento, el reporte se retrasará y el laboratorio perderá un indicador de oportunidad. ¿Qué haces?",
+        [
+            opt("A", "Mantengo el cultivo como está para no afectar el indicador del laboratorio.", 1, "utilitarismo"),
+            opt("B", "Mantengo el resultado si probablemente beneficie la decisión clínica inmediata.", 2, "utilitarismo"),
+            opt("C", "Pido una segunda revisión porque una colega responsable no debería cargar sola con esa duda.", 3, "cuidado"),
+            opt("D", "Anulo o repito la prueba según el protocolo de calidad y contaminación cruzada.", 4, "deontologia"),
+            opt("E", "Documento el evento, notifico control de calidad y explico el retraso con transparencia.", 5, "contrato_social"),
+            opt("F", "Prefiero una demora honesta a sostener un resultado potencialmente falso que pueda dañar a un paciente.", 6, "virtudes"),
+        ],
+        "Desarrolla juicio sobre integridad analítica, cultura de seguridad y decisiones bajo tensión entre calidad y productividad.",
+    ),
+    (
+        "BM4",
+        "Confidencialidad y hallazgo crítico sensible",
+        "Obtienes un resultado preliminar compatible con una infección transmisible de alto impacto social. Un directivo administrativo pide conocer el nombre del paciente antes de que el resultado crítico sea comunicado por el canal clínico establecido. ¿Qué haces?",
+        [
+            opt("A", "Entrego la información para evitar problemas con la dirección.", 1, "utilitarismo"),
+            opt("B", "La entrego si creo que eso podría acelerar medidas institucionales.", 2, "utilitarismo"),
+            opt("C", "Busco una salida cuidadosa que informe lo necesario sin exponer de más al paciente.", 3, "cuidado"),
+            opt("D", "Mantengo la confidencialidad y comunico el hallazgo crítico solo por la ruta autorizada.", 4, "deontologia"),
+            opt("E", "Escalo la decisión con registro, mínima revelación necesaria y protección de derechos.", 5, "contrato_social"),
+            opt("F", "Protejo simultáneamente dignidad, privacidad y seguridad pública con proporcionalidad estricta.", 6, "virtudes"),
+        ],
+        "Integra confidencialidad, reporte de hallazgos críticos y manejo proporcional de información sensible en microbiología clínica.",
+    ),
+    (
+        "BM5",
+        "Resistencia antimicrobiana y reporte selectivo",
+        "El antibiograma muestra un perfil de multirresistencia inesperado. Un médico cercano al laboratorio sugiere reportar solo antibióticos 'menos alarmantes' para evitar restricciones institucionales y discusiones con la familia. ¿Cómo respondes?",
+        [
+            opt("A", "Acepto para evitar conflicto con el médico solicitante.", 1, "utilitarismo"),
+            opt("B", "Acepto si eso reduce ansiedad y permite iniciar tratamiento rápido.", 2, "utilitarismo"),
+            opt("C", "Dialogo con el médico y explico que todos merecen un reporte honesto y responsable.", 3, "regla_de_oro"),
+            opt("D", "Reporto el perfil real según lineamientos de susceptibilidad y vigilancia.", 4, "deontologia"),
+            opt("E", "Activo el circuito de stewardship y documento por qué el reporte debe ser completo y trazable.", 5, "contrato_social"),
+            opt("F", "Defiendo verdad, salud pública y justicia intergeneracional frente a la resistencia antimicrobiana.", 6, "virtudes"),
+        ],
+        "Permite analizar la responsabilidad del laboratorio en la contención de resistencia antimicrobiana y en la veracidad de la información clínica.",
+    ),
+    (
+        "BM6",
+        "Errores analíticos y postanalíticos en cadena",
+        "Tras liberar un resultado negativo, descubres que el control interno del equipo falló y además el informe ya fue enviado al sistema sin comentario correctivo. El turno está saturado y te sugieren esperar al día siguiente para revisar. ¿Qué haces?",
+        [
+            opt("A", "Espero y veo si alguien más detecta el problema mañana.", 1, "deontologia"),
+            opt("B", "Espero si con eso evito caos operativo y quizá el impacto clínico sea bajo.", 2, "utilitarismo"),
+            opt("C", "Aviso al equipo inmediato porque una buena práctica cuida también a colegas y pacientes.", 3, "cuidado"),
+            opt("D", "Activo corrección, bloqueo del resultado y reproceso según el procedimiento analítico y postanalítico.", 4, "deontologia"),
+            opt("E", "Informo al servicio tratante, documento el error y abro análisis de causa con trazabilidad completa.", 5, "contrato_social"),
+            opt("F", "Asumo responsabilidad temprana para evitar daño clínico por una falsa seguridad diagnóstica.", 6, "virtudes"),
+        ],
+        "Conecta errores analíticos y postanalíticos con responsabilidad profesional, cultura justa y prevención de daño derivado del reporte.",
+    ),
+    (
+        "BM7",
+        "Uso ético de cultivos y microorganismos",
+        "Un investigador externo pide acceso rápido a una cepa aislada en el laboratorio para un ensayo no aprobado todavía por el comité correspondiente. Asegura que el uso será 'solo preliminar' y que después regularizará los permisos. ¿Qué haces?",
+        [
+            opt("A", "Se la entrego para no cerrar una oportunidad académica.", 1, "utilitarismo"),
+            opt("B", "La entrego si eso podría generar un hallazgo útil pronto.", 2, "utilitarismo"),
+            opt("C", "Le propongo esperar y tramitar lo necesario porque nadie querría que usaran su material biológico sin garantías.", 3, "regla_de_oro"),
+            opt("D", "No entrego la cepa sin aprobación, custodia y condiciones de bioseguridad formalmente verificadas.", 4, "deontologia"),
+            opt("E", "Gestiono acceso institucional con permisos, trazabilidad, evaluación de riesgo y acuerdo de uso.", 5, "contrato_social"),
+            opt("F", "Protejo la responsabilidad científica y social del laboratorio frente al manejo de microorganismos.", 6, "virtudes"),
+        ],
+        "Sitúa al estudiante frente al uso responsable de cultivos, la gobernanza del material biológico y la relación entre ciencia, riesgo y control institucional.",
+    ),
+    (
+        "BM8",
+        "Investigación con muestras biológicas y presión institucional",
+        "En un estudio con muestras remanentes aparece un hallazgo que puede afectar la reputación de la institución. La dirección propone retrasar, suavizar o reagrupar los resultados antes de informar al comité y a los investigadores principales. ¿Cómo actúas?",
+        [
+            opt("A", "Acepto para evitar problemas laborales con la institución.", 1, "utilitarismo"),
+            opt("B", "Acepto si eso protege temporalmente la imagen institucional y la continuidad del proyecto.", 2, "utilitarismo"),
+            opt("C", "Busco una conversación cuidadosa con el equipo para evitar injusticias y daño a participantes.", 3, "cuidado"),
+            opt("D", "Mantengo los datos tal como surgieron y sigo el protocolo de investigación y reporte.", 4, "deontologia"),
+            opt("E", "Activo comité, trazabilidad metodológica y comunicación transparente con resguardo de participantes.", 5, "contrato_social"),
+            opt("F", "Pongo por delante verdad científica, respeto por las muestras y dignidad de quienes confiaron en la investigación.", 6, "virtudes"),
+        ],
+        "Integra ética de investigación, custodia de muestras biológicas y resistencia a presiones institucionales que distorsionan evidencia.",
+    ),
+    (
+        "BM9",
+        "Bacteriología: probable contaminante en hemocultivo",
+        "Dos botellas de hemocultivo muestran crecimiento de un microorganismo que podría ser contaminante cutáneo o bacteriemia real. El servicio clínico exige que lo reportes como infección confirmada para justificar antibióticos de amplio espectro. ¿Qué haces?",
+        [
+            opt("A", "Lo reporto como infección confirmada para evitar discusiones con el clínico.", 1, "utilitarismo"),
+            opt("B", "Lo reporto como infección si eso facilita una intervención rápida aunque la evidencia sea incompleta.", 2, "utilitarismo"),
+            opt("C", "Dialogo con el equipo tratante y con el laboratorio para valorar el contexto antes de afirmar algo.", 3, "cuidado"),
+            opt("D", "Reporto el hallazgo con la interpretación técnica que corresponde y sugiero correlación clínica.", 4, "deontologia"),
+            opt("E", "Documento la incertidumbre, recomiendo confirmación y sostengo trazabilidad interpretativa.", 5, "contrato_social"),
+            opt("F", "Prefiero una verdad prudente antes que una certeza ficticia que exponga al paciente a daño innecesario.", 6, "virtudes"),
+        ],
+        "Entrena la distinción entre contaminación y bacteriemia, así como la responsabilidad interpretativa del bacteriólogo frente al uso de antibióticos.",
+    ),
+    (
+        "BM10",
+        "Bacteriología: rechazo de muestra mal rotulada",
+        "Recibes una muestra para coprocultivo con rotulación dudosa y datos clínicos incompletos. El personal asistencial pide no rechazarla porque repetir la toma será incómodo para el paciente y afectará los tiempos del servicio. ¿Qué haces?",
+        [
+            opt("A", "La proceso sin objeción para evitar reclamos del servicio.", 1, "utilitarismo"),
+            opt("B", "La proceso si eso ahorra tiempo, aunque la identificación no sea completamente segura.", 2, "utilitarismo"),
+            opt("C", "Intento aclarar la identificación con el servicio porque nadie querría ser diagnosticado con una muestra incierta.", 3, "regla_de_oro"),
+            opt("D", "Aplico el criterio de rechazo o regularización formal según el protocolo de identificación de muestras.", 4, "deontologia"),
+            opt("E", "Gestiono solución trazable con nueva toma o validación documental extraordinaria debidamente registrada.", 5, "contrato_social"),
+            opt("F", "Defiendo la validez de la muestra como condición ética mínima para un reporte clínico responsable.", 6, "virtudes"),
+        ],
+        "Permite trabajar identificación inequívoca, calidad preanalítica y justicia diagnóstica en bacteriología clínica.",
+    ),
+    (
+        "BM11",
+        "Microbiología: cepa multirresistente en docencia",
+        "Un docente quiere usar una cepa multirresistente de colección en una práctica con estudiantes antes de completar la verificación de condiciones de contención y entrenamiento. Argumenta que la oportunidad académica no puede perderse. ¿Qué haces?",
+        [
+            opt("A", "Acepto para no contrariar al docente responsable.", 1, "utilitarismo"),
+            opt("B", "Acepto si la práctica beneficiará a muchos estudiantes y el riesgo parece bajo.", 2, "utilitarismo"),
+            opt("C", "Propongo otra actividad temporal más segura porque nadie debería aprender exponiéndose indebidamente.", 3, "cuidado"),
+            opt("D", "No autorizo el uso hasta cumplir bioseguridad, entrenamiento y contención requeridos.", 4, "deontologia"),
+            opt("E", "Solicito evaluación de riesgo, aval formal y plan de contingencia antes de cualquier uso docente.", 5, "contrato_social"),
+            opt("F", "La formación ética también exige proteger a estudiantes, personal y comunidad frente a microorganismos de alto riesgo.", 6, "virtudes"),
+        ],
+        "Aborda uso ético de microorganismos, formación segura y responsabilidad institucional en microbiología aplicada y docente.",
+    ),
+    (
+        "BM12",
+        "Microbiología: secuenciación y comunicación de brote",
+        "La secuenciación preliminar sugiere un brote intrahospitalario por un mismo clon, pero la evidencia aún no es definitiva. La gerencia pide esperar silencio hasta tener confirmación total para evitar alarma reputacional. ¿Cómo actúas?",
+        [
+            opt("A", "Espero y no digo nada para no crear problemas institucionales.", 1, "utilitarismo"),
+            opt("B", "Espero si eso evita alarma mientras se completa el análisis.", 2, "utilitarismo"),
+            opt("C", "Comparto la preocupación con quienes pueden proteger a los pacientes sin exponer información innecesaria.", 3, "cuidado"),
+            opt("D", "Activo la notificación técnica interna según el protocolo de vigilancia microbiológica.", 4, "deontologia"),
+            opt("E", "Comunico el hallazgo como señal preliminar, con incertidumbre explícita y medidas preventivas proporcionales.", 5, "contrato_social"),
+            opt("F", "La prudencia ética exige advertir a tiempo cuando el silencio puede ampliar un daño prevenible.", 6, "virtudes"),
+        ],
+        "Conecta microbiología molecular, vigilancia epidemiológica y comunicación responsable bajo incertidumbre.",
+    ),
+]
+
+LAB_DILEMMA_CATALOG = [
+    {"id": "BM1", "ruta_sugerida": "Microbiología", "foco": "Bioseguridad y exposición ocupacional"},
+    {"id": "BM2", "ruta_sugerida": "Bacteriología", "foco": "Transporte de muestras y error preanalítico"},
+    {"id": "BM3", "ruta_sugerida": "Bacteriología / Microbiología", "foco": "Contaminación cruzada y control de calidad"},
+    {"id": "BM4", "ruta_sugerida": "Bacteriología / Microbiología", "foco": "Confidencialidad y reporte crítico"},
+    {"id": "BM5", "ruta_sugerida": "Bacteriología / Microbiología", "foco": "Resistencia antimicrobiana y reporte selectivo"},
+    {"id": "BM6", "ruta_sugerida": "Bacteriología", "foco": "Errores analíticos y postanalíticos"},
+    {"id": "BM7", "ruta_sugerida": "Microbiología", "foco": "Uso ético de cultivos y microorganismos"},
+    {"id": "BM8", "ruta_sugerida": "Bacteriología / Microbiología", "foco": "Investigación con muestras biológicas y presión institucional"},
+    {"id": "BM9", "ruta_sugerida": "Bacteriología", "foco": "Interpretación de hemocultivos y antibioticoterapia"},
+    {"id": "BM10", "ruta_sugerida": "Bacteriología", "foco": "Rotulación y validez de muestra"},
+    {"id": "BM11", "ruta_sugerida": "Microbiología", "foco": "Uso docente de cepas multirresistentes"},
+    {"id": "BM12", "ruta_sugerida": "Microbiología", "foco": "Secuenciación y comunicación de brotes"},
+]
+
 for item_id, title, prompt, options in health + law + it_cases:
     BANK.append(make_dilemma(item_id, title, prompt, options, STAGE_TEMPLATE))
 
+for item_id, title, prompt, options, pedagogical_justification in lab_cases:
+    BANK.append(make_dilemma(item_id, title, prompt, options, STAGE_TEMPLATE, pedagogical_justification))
+
 LOOKUP = {d["id"]: d for d in BANK}
-PROFESSION_ROUTES = {
-    "Salud (medicina/enfermería/fisioterapia/instrumentación)": ["K1", "K2", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8"],
-    "Derecho / Ciencias sociales / Educación": ["K1", "K2", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"],
-    "Ingeniería / TI / Datos": ["K1", "K2", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"],
-    "Otra / Mixta": ["K1", "K2", "H1", "L1", "T1", "H4", "L4", "T2"],
+PROFESSION_OPTIONS = [
+    "Medicina",
+    "Enfermería",
+    "Fisioterapia",
+    "Instrumentación Quirúrgica",
+    "Bacteriología",
+    "Microbiología",
+    "Derecho",
+    "Ciencias Sociales",
+    "Educación",
+    "Ingeniería",
+    "TI",
+    "Datos",
+    "Otra / Mixta",
+]
+
+ROUTE_BANKS = {
+    "salud": ["K1", "K2", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8"],
+    "bacteriologia_laboratorio": ["BM2", "BM3", "BM4", "BM5", "BM6", "BM8", "BM9", "BM10", "K1", "K2"],
+    "microbiologia_laboratorio": ["BM1", "BM3", "BM4", "BM5", "BM7", "BM8", "BM11", "BM12", "K1", "K2"],
+    "social_juridica": ["K1", "K2", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"],
+    "ingenieria_ti_datos": ["K1", "K2", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"],
+    "mixta": ["K1", "K2", "H1", "L1", "T1", "H4", "L4", "T2"],
 }
+
+PROFESSION_ROUTE_GROUPS = {
+    "Medicina": "salud",
+    "Enfermería": "salud",
+    "Fisioterapia": "salud",
+    "Instrumentación Quirúrgica": "salud",
+    "Bacteriología": "bacteriologia_laboratorio",
+    "Microbiología": "microbiologia_laboratorio",
+    "Derecho": "social_juridica",
+    "Ciencias Sociales": "social_juridica",
+    "Educación": "social_juridica",
+    "Ingeniería": "ingenieria_ti_datos",
+    "TI": "ingenieria_ti_datos",
+    "Datos": "ingenieria_ti_datos",
+    "Otra / Mixta": "mixta",
+}
+
+LEGACY_PROFESSION_LABELS = {
+    "Salud (legado)": "salud",
+    "Derecho / Ciencias Sociales / Educación (legado)": "social_juridica",
+    "Ingeniería / TI / Datos (legado)": "ingenieria_ti_datos",
+}
+
+PROFESSION_ALIASES = {
+    "Salud (medicina/enfermería/fisioterapia/instrumentación)": "Salud (legado)",
+    "Derecho / Ciencias sociales / Educación": "Derecho / Ciencias Sociales / Educación (legado)",
+    "Ingeniería / TI / Datos": "Ingeniería / TI / Datos (legado)",
+}
+
+PROFESSION_ROUTES = {
+    profession: ROUTE_BANKS[route_group]
+    for profession, route_group in PROFESSION_ROUTE_GROUPS.items()
+}
+
+PROFESSION_DISPLAY_ORDER = PROFESSION_OPTIONS + list(LEGACY_PROFESSION_LABELS.keys())
 
 
 # =========================
 # Utilidades de datos
 # =========================
 def ensure_storage() -> None:
-    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-    if not DATA_PATH.exists():
-        pd.DataFrame(columns=COLUMNS).to_csv(DATA_PATH, index=False)
-
-
-def write_locked(df: pd.DataFrame) -> None:
-    ensure_storage()
-    if portalocker is None:
-        df.to_csv(DATA_PATH, index=False)
-        return
-    with portalocker.Lock(str(LOCK_PATH), timeout=15):
-        df.to_csv(DATA_PATH, index=False)
+    PERSISTENCE_STORE.ensure_storage()
 
 
 @st.cache_data(show_spinner=False)
-def load_df_cached(file_mtime: float | None) -> pd.DataFrame:
-    del file_mtime
+def load_df_cached(cache_key: str) -> pd.DataFrame:
+    del cache_key
     ensure_storage()
-    df = pd.read_csv(DATA_PATH)
-    for c in COLUMNS:
-        if c not in df.columns:
-            df[c] = np.nan
+    df = PERSISTENCE_STORE.load_all_rows()
+    df["profession"] = df["profession"].apply(normalize_profession_label)
     return df[COLUMNS].copy()
 
 
 def load_df() -> pd.DataFrame:
-    mtime = DATA_PATH.stat().st_mtime if DATA_PATH.exists() else None
-    return load_df_cached(mtime)
+    return load_df_cached(PERSISTENCE_STORE.backend_detail)
 
 
-def save_df(df: pd.DataFrame) -> None:
-    write_locked(df)
+def save_attempt_rows(df: pd.DataFrame) -> None:
+    PERSISTENCE_STORE.save_rows(df)
     load_df_cached.clear()
 
 
@@ -411,6 +679,141 @@ def clean_text(text: str | None) -> str:
     raw = re.sub(r"[^a-záéíóúñü\s]", " ", raw)
     raw = re.sub(r"\s+", " ", raw).strip()
     return raw
+
+
+def normalize_profession_key(value: str | None) -> str:
+    text = (value or "").strip().lower()
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+PROFESSION_NORMALIZATION_MAP = {
+    normalize_profession_key(label): label
+    for label in PROFESSION_OPTIONS + list(LEGACY_PROFESSION_LABELS.keys())
+}
+PROFESSION_NORMALIZATION_MAP.update({
+    normalize_profession_key(alias): canonical
+    for alias, canonical in PROFESSION_ALIASES.items()
+})
+
+
+def normalize_profession_label(value: str | None) -> str | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    normalized = PROFESSION_NORMALIZATION_MAP.get(normalize_profession_key(str(value)))
+    if normalized:
+        return normalized
+    stripped = str(value).strip()
+    return stripped or None
+
+
+def route_group_for_profession(label: str | None) -> str:
+    normalized = normalize_profession_label(label)
+    if normalized in PROFESSION_ROUTE_GROUPS:
+        return PROFESSION_ROUTE_GROUPS[normalized]
+    if normalized in LEGACY_PROFESSION_LABELS:
+        return LEGACY_PROFESSION_LABELS[normalized]
+    return "mixta"
+
+
+def profession_category_order(values: pd.Series | None = None) -> List[str]:
+    base = list(PROFESSION_DISPLAY_ORDER)
+    if values is None:
+        return base
+    extras = []
+    for value in values.dropna().astype(str).unique().tolist():
+        if value not in base and value not in extras:
+            extras.append(value)
+    return base + sorted(extras)
+
+
+def normalize_group_label(value: str | None) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "Sin grupo"
+    stripped = str(value).strip()
+    return stripped if stripped else "Sin grupo"
+
+
+def get_admin_password() -> str | None:
+    env_password = os.getenv("MORAL_TEST_ADMIN_PASSWORD")
+    if env_password:
+        return env_password
+    try:
+        secret_password = st.secrets.get("MORAL_TEST_ADMIN_PASSWORD")
+    except Exception:
+        secret_password = None
+    return str(secret_password) if secret_password else None
+
+
+def is_admin_authenticated() -> bool:
+    return bool(st.session_state.get(ADMIN_SESSION_KEY, False))
+
+
+def admin_login_panel() -> bool:
+    configured_password = get_admin_password()
+    if not configured_password:
+        st.error(
+            "El acceso administrativo está bloqueado hasta configurar `MORAL_TEST_ADMIN_PASSWORD` en variables de entorno o secrets de Streamlit."
+        )
+        return False
+
+    if is_admin_authenticated():
+        return True
+
+    st.warning("Contenido restringido para administración. Ingresa la contraseña para continuar.")
+    with st.form("admin_login_form"):
+        password = st.text_input("Contraseña de administrador", type="password")
+        submitted = st.form_submit_button("Ingresar", use_container_width=True)
+
+    if submitted:
+        if hmac.compare_digest(password, configured_password):
+            st.session_state[ADMIN_SESSION_KEY] = True
+            st.rerun()
+        st.error("Contraseña incorrecta.")
+    return False
+
+
+def render_admin_session_controls() -> None:
+    if is_admin_authenticated() and st.sidebar.button("Cerrar sesión admin", use_container_width=True):
+        st.session_state[ADMIN_SESSION_KEY] = False
+        st.rerun()
+
+
+def apply_dashboard_filters(
+    students: pd.DataFrame,
+    df_last: pd.DataFrame,
+    selected_professions: List[str],
+    selected_groups: List[str],
+    year_range: Tuple[int, int],
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    filtered_students = students.copy()
+    filtered_students["group_filter"] = filtered_students["group"].apply(normalize_group_label)
+
+    if selected_professions:
+        filtered_students = filtered_students[filtered_students["profession"].isin(selected_professions)]
+    else:
+        filtered_students = filtered_students.iloc[0:0].copy()
+
+    if selected_groups:
+        filtered_students = filtered_students[filtered_students["group_filter"].isin(selected_groups)]
+    else:
+        filtered_students = filtered_students.iloc[0:0].copy()
+
+    min_year, max_year = year_range
+    filtered_students = filtered_students[
+        filtered_students["years_experience"].fillna(0).astype(float).between(min_year, max_year)
+    ].copy()
+
+    selected_ids = filtered_students["anon_id"].dropna().unique().tolist()
+    filtered_df_last = df_last[df_last["anon_id"].isin(selected_ids)].copy()
+    if not filtered_df_last.empty:
+        filtered_df_last["group_filter"] = filtered_df_last["group"].apply(normalize_group_label)
+
+    return filtered_students, filtered_df_last
 
 
 def bootstrap_ci(values: np.ndarray | list, func=np.mean, n_boot: int = 2000, alpha: float = 0.05) -> Tuple[float, float, float]:
@@ -444,7 +847,8 @@ def hedges_g(a: np.ndarray | list, b: np.ndarray | list) -> float:
 
 
 def route_for_profession(label: str, route_size: int) -> List[dict]:
-    ids = PROFESSION_ROUTES.get(label, ["K1", "K2"])[:route_size]
+    route_group = route_group_for_profession(label)
+    ids = ROUTE_BANKS.get(route_group, ["K1", "K2"])[:route_size]
     return [LOOKUP[item_id] for item_id in ids]
 
 
@@ -533,6 +937,7 @@ def student_table(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     students = meta.merge(k_df, on="anon_id", how="left")
     students = students.merge(fw_df, on="anon_id", how="left")
     students = students.merge(choice_summary, on="anon_id", how="left")
+    students["profession"] = students["profession"].apply(normalize_profession_label)
     return students, df_last
 
 
@@ -645,6 +1050,7 @@ def render_global_styles() -> None:
             padding: 1rem;
             border-radius: 14px;
             margin-bottom: 1rem;
+            color: #0b1f3a;
         }
         .objective-card {
             background: #ffffff;
@@ -653,10 +1059,37 @@ def render_global_styles() -> None:
             padding: .95rem 1rem;
             min-height: 120px;
             box-shadow: 0 4px 12px rgba(17, 35, 58, 0.06);
+            color: #0b1f3a;
+        }
+        .objective-card strong {
+            color: #0b1f3a;
         }
         .minor-note {
             color: #5a6b7c;
             font-size: 0.93rem;
+        }
+        .section-card {
+            background: linear-gradient(180deg, #f9fbfd 0%, #f2f6fa 100%);
+            border: 1px solid #d7e2ee;
+            border-radius: 16px;
+            padding: 1rem 1.1rem;
+            margin-bottom: 0.9rem;
+        }
+        .section-card h3 {
+            margin: 0 0 0.35rem 0;
+            color: #0b1f3a;
+        }
+        .section-card p {
+            margin: 0;
+            color: #405569;
+        }
+        .interpretation-panel {
+            background: #fbfcfe;
+            border: 1px solid #d8e2ec;
+            border-left: 6px solid #c08a2b;
+            border-radius: 14px;
+            padding: 1rem 1.1rem;
+            color: #0b1f3a;
         }
         </style>
         """,
@@ -727,8 +1160,8 @@ def make_program_flow_figure() -> go.Figure:
 
 def make_route_summary_figure() -> go.Figure:
     rows = []
-    for route, items in PROFESSION_ROUTES.items():
-        rows.append({"ruta": route, "dilemas": len(items)})
+    for profession in PROFESSION_OPTIONS:
+        rows.append({"ruta": profession, "dilemas": len(PROFESSION_ROUTES[profession])})
     data = pd.DataFrame(rows)
     fig = px.bar(
         data,
@@ -738,7 +1171,11 @@ def make_route_summary_figure() -> go.Figure:
         text="dilemas",
         height=420,
     )
-    fig.update_layout(xaxis_title="Ruta profesional", yaxis_title="Número de dilemas")
+    fig.update_layout(
+        xaxis_title="Profesión",
+        yaxis_title="Número de dilemas",
+        xaxis={"categoryorder": "array", "categoryarray": PROFESSION_OPTIONS},
+    )
     return fig
 
 
@@ -778,10 +1215,17 @@ def page_program() -> None:
         st.plotly_chart(make_route_summary_figure(), use_container_width=True)
     with g2:
         route_mix = pd.DataFrame({
-            "componente": ["Dilemas núcleo", "Ruta salud", "Ruta derecho/social", "Ruta ingeniería/TI"],
-            "cantidad": [2, 8, 8, 8],
+            "componente": [
+                "Profesiones ruta salud",
+                "Profesiones ruta bacteriología",
+                "Profesiones ruta microbiología",
+                "Profesiones ruta derecho/social",
+                "Profesiones ruta ingeniería/TI/datos",
+                "Profesiones ruta mixta",
+            ],
+            "cantidad": [4, 1, 1, 3, 3, 1],
         })
-        fig = px.pie(route_mix, names="componente", values="cantidad", hole=0.48, title="Composición del banco base de dilemas", height=420)
+        fig = px.pie(route_mix, names="componente", values="cantidad", hole=0.48, title="Distribución de profesiones por familia de ruta", height=420)
         st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("### Qué produce la herramienta")
@@ -798,32 +1242,229 @@ def make_radar(scores: Dict[str, float], title: str) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(
         r=[scores.get(fw, np.nan) for fw in FRAMEWORKS],
-        theta=FRAMEWORKS,
+        theta=[FRAMEWORK_LABELS.get(fw, fw) for fw in FRAMEWORKS],
         fill="toself",
         name="Perfil",
+        line=dict(color="#1c5f8d", width=3),
+        fillcolor="rgba(28, 95, 141, 0.22)",
     ))
-    fig.update_layout(
-        title=title,
-        polar=dict(radialaxis=dict(visible=True, range=[1, 7])),
-        showlegend=False,
+    return style_academic_figure(
+        fig,
+        title,
         height=450,
+        showlegend=False,
+        polar=dict(radialaxis=dict(visible=True, range=[1, 7], gridcolor="#d7e2ee")),
     )
-    return fig
 
 
 def make_sankey_from_choices(choices_df: pd.DataFrame, title: str) -> go.Figure:
-    nodes = list(choices_df["item_id"].unique()) + list(choices_df["choice_framework"].unique())
+    if choices_df.empty:
+        return go.Figure()
+    links = choices_df.groupby(["item_id", "choice_framework"]).size().reset_index(name="value")
+    links["choice_framework"] = links["choice_framework"].map(lambda value: FRAMEWORK_LABELS.get(value, value))
+    nodes = list(links["item_id"].unique()) + list(links["choice_framework"].unique())
     idx = {label: i for i, label in enumerate(nodes)}
     fig = go.Figure(data=[go.Sankey(
-        node=dict(label=nodes),
+        node=dict(
+            label=nodes,
+            pad=18,
+            thickness=18,
+            line=dict(color="#d7e2ee", width=0.8),
+            color=["#0b1f3a" if label in links["item_id"].unique() else "#c08a2b" for label in nodes],
+        ),
         link=dict(
-            source=[idx[val] for val in choices_df["item_id"]],
-            target=[idx[val] for val in choices_df["choice_framework"]],
-            value=[1] * len(choices_df),
+            source=[idx[val] for val in links["item_id"]],
+            target=[idx[val] for val in links["choice_framework"]],
+            value=links["value"].tolist(),
+            color="rgba(28, 95, 141, 0.28)",
         ),
     )])
-    fig.update_layout(title=title, height=500)
+    return style_academic_figure(fig, title, height=500)
+
+
+def framework_label(value: str) -> str:
+    return FRAMEWORK_LABELS.get(value, value.replace("_", " ").strip().title())
+
+
+def filename_slug(value: str) -> str:
+    text = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower())
+    return text.strip("_") or "grafica"
+
+
+def style_academic_figure(fig: go.Figure, title: str, height: int = 480, showlegend: bool = True, **layout_updates) -> go.Figure:
+    fig.update_layout(
+        title={"text": title, "x": 0.02, "xanchor": "left"},
+        template="plotly_white",
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
+        font=dict(family="Georgia, Times New Roman, serif", size=14, color="#0b1f3a"),
+        colorway=ACADEMIC_COLOR_SEQUENCE,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            bgcolor="rgba(255,255,255,0.85)",
+        ),
+        margin=dict(l=40, r=20, t=70, b=50),
+        height=height,
+        showlegend=showlegend,
+        **layout_updates,
+    )
+    fig.update_xaxes(showline=True, linewidth=1, linecolor="#c9d6e2", gridcolor="#ecf1f6")
+    fig.update_yaxes(showline=True, linewidth=1, linecolor="#c9d6e2", gridcolor="#ecf1f6")
     return fig
+
+
+def render_plotly_figure(fig: go.Figure, export_name: str, data_df: pd.DataFrame | None = None, caption: str | None = None) -> None:
+    export_slug = filename_slug(export_name)
+    config = {
+        **PLOTLY_EXPORT_CONFIG,
+        "toImageButtonOptions": {
+            **PLOTLY_EXPORT_CONFIG["toImageButtonOptions"],
+            "filename": export_slug,
+        },
+    }
+    st.plotly_chart(fig, use_container_width=True, config=config)
+    controls = st.columns([1, 1, 5]) if data_df is not None else st.columns([1, 5])
+    controls[0].download_button(
+        "Descargar HTML",
+        data=pio.to_html(fig, include_plotlyjs="cdn", full_html=True).encode("utf-8"),
+        file_name=f"{export_slug}.html",
+        mime="text/html",
+        key=f"html_{export_slug}",
+        use_container_width=True,
+    )
+    if data_df is not None:
+        controls[1].download_button(
+            "Descargar CSV",
+            data=data_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"{export_slug}.csv",
+            mime="text/csv",
+            key=f"csv_{export_slug}",
+            use_container_width=True,
+        )
+    if caption:
+        st.caption(caption)
+
+
+def make_profession_distribution_bar(profession_distribution: pd.DataFrame, profession_order: List[str]) -> go.Figure:
+    plot_df = profession_distribution.copy()
+    fig = px.bar(
+        plot_df,
+        x="profession",
+        y="n",
+        color="profession",
+        text="n",
+        title="Distribución de participantes por profesión",
+        category_orders={"profession": profession_order},
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+    )
+    fig.update_layout(showlegend=False, xaxis_title="Profesión", yaxis_title="Participantes")
+    fig.update_traces(textposition="outside")
+    return style_academic_figure(fig, "Distribución de participantes por profesión", height=430, showlegend=False)
+
+
+def make_framework_heatmap(framework_summary: pd.DataFrame, profession_order: List[str]) -> go.Figure:
+    plot_df = framework_summary.copy()
+    plot_df["framework_label"] = plot_df["framework"].map(framework_label)
+    fig = px.density_heatmap(
+        plot_df,
+        x="framework_label",
+        y="profession",
+        z="framework_mean",
+        histfunc="avg",
+        color_continuous_scale=["#f3f7fb", "#9db9d3", "#1c5f8d", "#0b1f3a"],
+        title="Intensidad promedio de marcos éticos por profesión",
+        category_orders={"profession": profession_order},
+    )
+    fig.update_layout(xaxis_title="Marco ético", yaxis_title="Profesión", coloraxis_colorbar_title="Promedio")
+    return style_academic_figure(fig, "Intensidad promedio de marcos éticos por profesión", height=500)
+
+
+def make_collective_radar(framework_summary: pd.DataFrame, professions: List[str]) -> go.Figure:
+    fig = go.Figure()
+    if framework_summary.empty:
+        return fig
+    subset = framework_summary[framework_summary["profession"].isin(professions)].copy()
+    for profession in professions:
+        prof_data = subset[subset["profession"] == profession]
+        if prof_data.empty:
+            continue
+        values = []
+        for fw in FRAMEWORKS:
+            match = prof_data.loc[prof_data["framework"] == fw, "framework_mean"]
+            values.append(float(match.iloc[0]) if not match.empty else np.nan)
+        fig.add_trace(go.Scatterpolar(
+            r=values,
+            theta=[framework_label(fw) for fw in FRAMEWORKS],
+            fill="toself",
+            name=profession,
+            opacity=0.35,
+        ))
+    return style_academic_figure(
+        fig,
+        "Radar comparativo de marcos éticos por profesión",
+        height=520,
+        polar=dict(radialaxis=dict(visible=True, range=[1, 7], gridcolor="#d7e2ee")),
+    )
+
+
+def make_collective_cluster_bar(cluster_summary: pd.DataFrame) -> go.Figure:
+    plot_df = cluster_summary.copy()
+    plot_df["cluster_label"] = plot_df["cluster"].map(lambda value: f"Cluster {value}")
+    fig = px.bar(
+        plot_df,
+        x="cluster_label",
+        y="n",
+        color="dominant_profession",
+        text="n",
+        title="Peso relativo de clusters cualitativos",
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+    )
+    fig.update_layout(xaxis_title="Cluster cualitativo", yaxis_title="Justificaciones")
+    fig.update_traces(textposition="outside")
+    return style_academic_figure(fig, "Peso relativo de clusters cualitativos", height=420)
+
+
+def make_stage_profile_chart(stage_means: Dict[int, float], title: str) -> go.Figure:
+    plot_df = pd.DataFrame({
+        "stage": [f"Estadio {stage}" for stage in range(1, 7)],
+        "mean": [stage_means.get(stage, np.nan) for stage in range(1, 7)],
+    })
+    fig = px.bar(
+        plot_df,
+        x="stage",
+        y="mean",
+        text="mean",
+        title=title,
+        color="mean",
+        color_continuous_scale=["#d8e2ec", "#8ab0c9", "#1c5f8d"],
+    )
+    fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+    fig.update_layout(xaxis_title="Estadio", yaxis_title="Promedio Likert", coloraxis_showscale=False)
+    fig.update_yaxes(range=[0, 7.4])
+    return style_academic_figure(fig, title, height=420, showlegend=False)
+
+
+def build_executive_kpi_table(students: pd.DataFrame, quantitative_report: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    k_mean, k_lo, k_hi = bootstrap_ci(students["k_est"].dropna().values, np.mean)
+    c_mean, _, _ = bootstrap_ci(students["k_coherence_std"].dropna().values, np.mean)
+    top_framework = students["fw_dom"].mode().iloc[0] if students["fw_dom"].notna().any() else "Sin predominio"
+    top_level = students["k_level"].mode().iloc[0] if students["k_level"].notna().any() else "Sin predominio"
+    profession_distribution = quantitative_report.get("profession_distribution", pd.DataFrame())
+    top_profession = profession_distribution.iloc[0]["profession"] if not profession_distribution.empty else "Sin datos"
+    return pd.DataFrame([
+        {"KPI": "Participantes consolidados", "Valor": int(len(students)), "Lectura": "Base efectiva del análisis colectivo"},
+        {"KPI": "Profesiones representadas", "Valor": int(students["profession"].nunique()), "Lectura": "Diversidad disciplinar presente"},
+        {"KPI": "Cohortes activas", "Valor": int(students["group"].fillna("Sin grupo").nunique()), "Lectura": "Número de grupos comparables"},
+        {"KPI": "k_est promedio", "Valor": f"{k_mean:.2f}" if pd.notna(k_mean) else "NA", "Lectura": f"IC95% [{k_lo:.2f}, {k_hi:.2f}]" if pd.notna(k_mean) else "Sin estimación"},
+        {"KPI": "Coherencia promedio", "Valor": f"{c_mean:.2f}" if pd.notna(c_mean) else "NA", "Lectura": "Dispersión interna entre estadios"},
+        {"KPI": "Marco dominante más frecuente", "Valor": framework_label(str(top_framework)), "Lectura": "Predominio agregado observado"},
+        {"KPI": "Nivel moral más frecuente", "Valor": str(top_level).title(), "Lectura": "Tendencia descriptiva agregada"},
+        {"KPI": "Profesión con mayor peso muestral", "Valor": str(top_profession), "Lectura": "Mayor aporte relativo a la muestra"},
+    ])
 
 
 def metrics_section(students: pd.DataFrame) -> None:
@@ -864,7 +1505,7 @@ def profession_gap_table(students: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("hedges_g", key=lambda s: s.abs(), ascending=False)
 
 
-def qualitative_clusters(df_last: pd.DataFrame) -> Tuple[pd.DataFrame, go.Figure | None]:
+def qualitative_clusters(df_last: pd.DataFrame, profession_order: List[str] | None = None) -> Tuple[pd.DataFrame, go.Figure | None]:
     choices = df_last[df_last["row_type"] == "choice"].copy()
     choices["clean"] = choices["text"].fillna("").astype(str).map(clean_text)
     choices = choices[choices["clean"].str.len() > 0].copy()
@@ -899,6 +1540,7 @@ def qualitative_clusters(df_last: pd.DataFrame) -> Tuple[pd.DataFrame, go.Figure
         histfunc="avg",
         title="Distribución de clusters argumentativos por profesión (%)",
         height=450,
+        category_orders={"profession": profession_order or profession_category_order(heat["profession"])},
     )
     return summary, fig
 
@@ -910,7 +1552,7 @@ def page_apply(df: pd.DataFrame) -> None:
     st.subheader("Aplicación individual")
     st.write("Completa el instrumento y genera un reporte individual inmediato.")
     a1, a2, a3 = st.columns(3)
-    a1.metric("Rutas disponibles", str(len(PROFESSION_ROUTES)))
+    a1.metric("Profesiones disponibles", str(len(PROFESSION_ROUTES)))
     a2.metric("Marcos éticos evaluados", str(len(FRAMEWORKS)))
     a3.metric("Justificación mínima", f"{MIN_JUSTIFICATION_CHARS} caracteres")
     st.caption("La app valora razonamiento argumentativo básico: opción elegida, calidad de la justificación, patrones por estadio y afinidad con marcos éticos.")
@@ -927,17 +1569,29 @@ def page_apply(df: pd.DataFrame) -> None:
         group = c3.text_input("Grupo / cohorte / curso", max_chars=120)
 
         c4, c5 = st.columns([2, 1])
-        profession = c4.selectbox("Área profesional", options=list(PROFESSION_ROUTES.keys()))
+        profession = c4.selectbox("Profesión", options=PROFESSION_OPTIONS)
         years_experience = c5.number_input("Años de experiencia", min_value=0, max_value=60, value=0, step=1)
 
+        route_group = route_group_for_profession(profession)
+        full_route_ids = ROUTE_BANKS.get(route_group, [])
         dilemmas = route_for_profession(profession, route_size)
         st.markdown("### A. Dilemas y justificación argumentativa")
         st.caption("Se exige una justificación breve con razonamiento suficiente; evita respuestas telegráficas.")
+        if route_group in {"bacteriologia_laboratorio", "microbiologia_laboratorio"}:
+            st.info(
+                f"Ruta específica de {profession}: se cargaron {len(dilemmas)} de {len(full_route_ids)} dilemas disponibles. "
+                "Los dilemas específicos de la profesión aparecen primero; si quieres ver toda la ruta, aumenta el valor del control 'Número de dilemas por ruta'."
+            )
+            with st.expander(f"Ver catálogo completo de la ruta de {profession}"):
+                for item_id in full_route_ids:
+                    st.markdown(f"- **{item_id}**: {LOOKUP[item_id]['title']}")
 
         collected_choices = []
         for i, dilemma in enumerate(dilemmas, start=1):
             st.markdown(f"**{i}. {dilemma['title']}**")
             st.write(dilemma["prompt"])
+            if dilemma.get("pedagogical_justification"):
+                st.caption(f"Justificación pedagógica: {dilemma['pedagogical_justification']}")
             options_map = {f"{o['key']}. {o['text']}": o for o in dilemma["options"]}
             selected_label = st.radio(
                 f"Selecciona la opción para {dilemma['id']}",
@@ -1032,8 +1686,7 @@ def page_apply(df: pd.DataFrame) -> None:
         framework_payload=framework_values,
     )
 
-    full_df = pd.concat([df, new_rows], ignore_index=True)
-    save_df(full_df)
+    save_attempt_rows(new_rows)
     person = new_rows.copy()
     choice_df = person[person["row_type"] == "choice"].copy()
     stage_df = person[person["row_type"] == "stage_likert"].copy()
@@ -1078,6 +1731,26 @@ def page_apply(df: pd.DataFrame) -> None:
     with st.expander("Ver detalle de respuestas"):
         st.dataframe(choice_df[["item_id", "choice_level", "choice_framework", "text"]], use_container_width=True)
 
+    attempt_timestamp = str(person["timestamp"].iloc[0]) if not person.empty else now_iso()
+    anon_id = str(person["anon_id"].iloc[0]) if not person.empty else sha_id(student_id.strip())
+    ADMIN_REPORT_STORE.save_individual_report(
+        timestamp=attempt_timestamp,
+        anon_id=anon_id,
+        student_id=student_id.strip(),
+        name=name.strip(),
+        profession=profession,
+        group=group.strip(),
+        years_experience=int(years_experience),
+        k_est=k_est,
+        k_stage=k_stage,
+        k_level=k_level,
+        coherence=coherence,
+        fw_dom=fw_dom,
+        fw_scores=fw_scores,
+        stage_means=stage_means,
+        choice_df=choice_df[["item_id", "choice_key", "choice_level", "choice_framework", "text"]].copy(),
+    )
+
 
 def page_dashboard(df: pd.DataFrame) -> None:
     st.subheader("Dashboard colectivo")
@@ -1090,150 +1763,455 @@ def page_dashboard(df: pd.DataFrame) -> None:
         st.warning("No fue posible consolidar participantes.")
         return
 
-    metrics_section(students)
+    students = students.copy()
+    df_last = df_last.copy()
+    students["group_filter"] = students["group"].apply(normalize_group_label)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Distribuciones", "Brechas", "Cualitativo", "Datos"])
+    profession_options = [
+        value for value in profession_category_order(students["profession"])
+        if value in students["profession"].dropna().astype(str).unique().tolist()
+    ]
+    group_options = sorted(students["group_filter"].dropna().astype(str).unique().tolist())
 
-    with tab1:
-        fig1 = px.violin(
-            students,
+    year_values = students["years_experience"].dropna().astype(float)
+    year_min = int(year_values.min()) if not year_values.empty else 0
+    year_max = int(year_values.max()) if not year_values.empty else 0
+
+    st.markdown("### Filtros")
+    f1, f2, f3 = st.columns([1.4, 1.2, 1.2])
+    selected_professions = f1.multiselect(
+        "Profesiones",
+        options=profession_options,
+        default=profession_options,
+    )
+    selected_groups = f2.multiselect(
+        "Grupos / cohortes",
+        options=group_options,
+        default=group_options,
+    )
+    if year_min < year_max:
+        selected_year_range = f3.slider(
+            "Años de experiencia",
+            min_value=year_min,
+            max_value=year_max,
+            value=(year_min, year_max),
+        )
+    else:
+        f3.caption(f"Años de experiencia: {year_min}")
+        selected_year_range = (year_min, year_max)
+
+    students_filtered, df_last_filtered = apply_dashboard_filters(
+        students,
+        df_last,
+        selected_professions,
+        selected_groups,
+        selected_year_range,
+    )
+
+    if students_filtered.empty:
+        st.warning("Los filtros actuales no devuelven participantes. Ajusta la selección para continuar.")
+        return
+
+    st.caption(f"Mostrando {len(students_filtered)} de {len(students)} participantes consolidados.")
+
+    ADMIN_REPORT_STORE.save_collective_snapshot(
+        students_df=students.drop(columns=["group_filter"], errors="ignore"),
+        last_attempt_df=df_last,
+        snapshot_name="latest_global",
+    )
+    ADMIN_REPORT_STORE.save_collective_snapshot(
+        students_df=students_filtered.drop(columns=["group_filter"], errors="ignore"),
+        last_attempt_df=df_last_filtered.drop(columns=["group_filter"], errors="ignore"),
+        snapshot_name="latest_filtered",
+    )
+
+    quantitative_report = build_quantitative_report(
+        students_filtered.drop(columns=["group_filter"], errors="ignore"),
+        df_last_filtered.drop(columns=["group_filter"], errors="ignore"),
+        FRAMEWORKS,
+    )
+    keyword_df = extract_keywords_by_group(df_last_filtered, BASE_STOPWORDS, group_col="profession")
+    cluster_summary, cluster_distribution = cluster_thematic_justifications(df_last_filtered, BASE_STOPWORDS, RANDOM_SEED)
+    pattern_summary = argumentative_pattern_table(df_last_filtered, BASE_STOPWORDS)
+    trends_df = profession_interpretive_trends(
+        students_filtered.drop(columns=["group_filter"], errors="ignore"),
+        keyword_df,
+        pattern_summary,
+    )
+    collective_synthesis = automatic_interpretive_synthesis(
+        students_filtered.drop(columns=["group_filter"], errors="ignore"),
+        quantitative_report,
+        trends_df,
+        cluster_summary,
+    )
+    processed_texts = df_last_filtered[df_last_filtered["row_type"] == "choice"].copy()
+    if not processed_texts.empty:
+        processed_texts["texto_limpio"] = clean_text_series(processed_texts["text"], BASE_STOPWORDS)
+    profession_order = profession_category_order(students_filtered["profession"])
+    profession_distribution = quantitative_report["profession_distribution"].copy()
+    framework_summary = quantitative_report["framework_summary"].copy()
+    profession_comparisons = quantitative_report["profession_comparisons"].copy()
+    cohort_summary = quantitative_report["cohort_summary"].copy()
+    executive_kpis = build_executive_kpi_table(students_filtered, quantitative_report)
+    collective_choice_df = df_last_filtered[df_last_filtered["row_type"] == "choice"].copy()
+    if not collective_choice_df.empty:
+        collective_choice_df["framework_label"] = collective_choice_df["choice_framework"].map(framework_label)
+
+    metrics_section(students_filtered)
+
+    tabs = st.tabs([
+        "1. Resumen general",
+        "2. Análisis individual",
+        "3. Análisis por profesión",
+        "4. Análisis cualitativo",
+        "5. Interpretación integrada",
+    ])
+
+    with tabs[0]:
+        st.markdown(
+            """
+            <div class="section-card">
+                <h3>Resumen general</h3>
+                <p>Vista ejecutiva del comportamiento agregado de la cohorte, con indicadores clave y visualizaciones de distribución de alto nivel para docencia, seguimiento y análisis académico.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("#### Tabla ejecutiva con KPIs")
+        st.dataframe(executive_kpis, use_container_width=True)
+
+        summary_col1, summary_col2 = st.columns([1, 1])
+        with summary_col1:
+            profession_bar = make_profession_distribution_bar(profession_distribution, profession_order)
+            render_plotly_figure(
+                profession_bar,
+                "barras_profesion",
+                data_df=profession_distribution,
+                caption="Distribución absoluta y relativa de la muestra consolidada por profesión.",
+            )
+        with summary_col2:
+            sun = students_filtered.dropna(subset=["profession", "k_level", "fw_dom"]).copy()
+            if sun.empty:
+                st.info("No hay datos suficientes para construir el sunburst agregado.")
+            else:
+                sun["marco_dominante_label"] = sun["fw_dom"].map(framework_label)
+                sunburst_fig = px.sunburst(
+                    sun,
+                    path=["profession", "k_level", "marco_dominante_label"],
+                    title="Profesión → nivel → marco dominante",
+                    color="k_level",
+                    color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+                )
+                sunburst_fig = style_academic_figure(sunburst_fig, "Profesión → nivel → marco dominante", height=560)
+                render_plotly_figure(
+                    sunburst_fig,
+                    "sunburst_profesion_nivel_marco",
+                    data_df=sun[["profession", "k_level", "marco_dominante_label"]],
+                    caption="Jerarquía agregada entre profesión, nivel moral predominante y marco ético dominante.",
+                )
+
+        st.markdown("#### Flujo agregado de dilemas hacia marcos éticos")
+        if collective_choice_df.empty:
+            st.info("No hay respuestas de dilemas suficientes para construir el Sankey colectivo.")
+        else:
+            collective_sankey = make_sankey_from_choices(collective_choice_df, "Dilema → marco ético")
+            render_plotly_figure(
+                collective_sankey,
+                "sankey_dilema_marco",
+                data_df=collective_choice_df[["profession", "item_id", "choice_framework", "framework_label", "choice_level"]],
+                caption="Mapa de decisión agregado entre los dilemas respondidos y los marcos éticos finalmente seleccionados.",
+            )
+
+    with tabs[1]:
+        st.markdown(
+            """
+            <div class="section-card">
+                <h3>Análisis individual</h3>
+                <p>Explora el perfil de un participante dentro del conjunto filtrado para apoyar retroalimentación tutorial, discusión en aula y seguimiento formativo individual.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        participant_df = students_filtered[["anon_id", "name", "student_id", "profession", "group", "timestamp"]].copy()
+        participant_df["display_label"] = participant_df.apply(
+            lambda row: f"{row['name'] or row['student_id'] or row['anon_id'][:8]} | {row['profession']} | {normalize_group_label(row['group'])}",
+            axis=1,
+        )
+        selected_label = st.selectbox("Selecciona participante", options=participant_df["display_label"].tolist())
+        selected_anon = participant_df.loc[participant_df["display_label"] == selected_label, "anon_id"].iloc[0]
+        selected_student = students_filtered[students_filtered["anon_id"] == selected_anon].iloc[0]
+        selected_rows = df_last_filtered[df_last_filtered["anon_id"] == selected_anon].copy()
+        selected_choice_df = selected_rows[selected_rows["row_type"] == "choice"].copy()
+        selected_stage_df = selected_rows[selected_rows["row_type"] == "stage_likert"].copy()
+        selected_fw_df = selected_rows[selected_rows["row_type"] == "framework_likert"].copy()
+
+        ind_k_est, ind_k_stage, ind_k_level, ind_stage_means = kohlberg_from_stage_likert(selected_stage_df)
+        ind_fw_scores, ind_fw_dom = framework_scores(selected_fw_df)
+        ind_coherence = float(np.nanstd(list(ind_stage_means.values()))) if ind_stage_means else np.nan
+
+        i1, i2, i3, i4 = st.columns(4)
+        i1.metric("Profesión", str(selected_student["profession"]))
+        i2.metric("Nivel global", str(ind_k_level))
+        i3.metric("Índice k_est", f"{ind_k_est:.2f}" if pd.notna(ind_k_est) else "NA")
+        i4.metric("Marco dominante", framework_label(str(ind_fw_dom)) if ind_fw_dom else "NA")
+        st.caption(
+            f"Grupo: {normalize_group_label(selected_student['group'])} | Estadio redondeado: {ind_k_stage} | Coherencia interna: {ind_coherence:.2f}"
+        )
+
+        ind_col1, ind_col2 = st.columns([1, 1])
+        with ind_col1:
+            individual_radar = make_radar(ind_fw_scores, "Perfil individual de marcos éticos")
+            render_plotly_figure(
+                individual_radar,
+                f"radar_individual_{selected_anon}",
+                data_df=pd.DataFrame([{"framework": framework_label(key), "score": value} for key, value in ind_fw_scores.items()]),
+                caption="Perfil individual de afinidad relativa con los marcos éticos evaluados.",
+            )
+        with ind_col2:
+            stage_chart = make_stage_profile_chart(ind_stage_means, "Perfil individual por estadios morales")
+            render_plotly_figure(
+                stage_chart,
+                f"estadios_individual_{selected_anon}",
+                data_df=pd.DataFrame([{"stage": stage, "mean": value} for stage, value in ind_stage_means.items()]),
+                caption="Promedios individuales en los ítems tipo Likert vinculados a estadios de razonamiento moral.",
+            )
+
+        if selected_choice_df.empty:
+            st.info("Este participante no tiene elecciones de dilemas disponibles para Sankey o detalle argumentativo.")
+        else:
+            individual_sankey = make_sankey_from_choices(selected_choice_df, "Dilema → marco ético del participante")
+            render_plotly_figure(
+                individual_sankey,
+                f"sankey_individual_{selected_anon}",
+                data_df=selected_choice_df[["item_id", "choice_framework", "choice_level", "text"]],
+                caption="Flujo individual entre dilemas respondidos y marcos éticos escogidos.",
+            )
+            with st.expander("Ver justificaciones y elecciones del participante"):
+                st.dataframe(
+                    selected_choice_df[["item_id", "choice_level", "choice_framework", "text"]],
+                    use_container_width=True,
+                )
+
+    with tabs[2]:
+        st.markdown(
+            """
+            <div class="section-card">
+                <h3>Análisis por profesión</h3>
+                <p>Compara dispersiones, promedios éticos y perfiles agregados por profesión para apoyar decisiones docentes, lectura comparativa entre grupos y análisis de tendencias disciplinares.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        violin_fig = px.violin(
+            students_filtered,
             x="profession",
             y="k_est",
+            color="profession",
             box=True,
             points="all",
-            title="k_est por profesión",
-            height=500,
+            category_orders={"profession": profession_order},
+            color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+            title="Distribución de k_est por profesión",
         )
-        st.plotly_chart(fig1, use_container_width=True)
-
-        fw_cols = [f"fw_{fw}" for fw in FRAMEWORKS]
-        heat = students.groupby("profession")[fw_cols].mean().reset_index()
-        heat_m = heat.melt(id_vars="profession", var_name="framework", value_name="mean")
-        heat_m["framework"] = heat_m["framework"].str.replace("fw_", "", regex=False)
-        fig2 = px.density_heatmap(
-            heat_m,
-            x="framework",
-            y="profession",
-            z="mean",
-            histfunc="avg",
-            title="Promedio de marcos éticos por profesión",
-            height=500,
+        violin_fig.update_layout(showlegend=False, xaxis_title="Profesión", yaxis_title="Índice k_est")
+        violin_fig = style_academic_figure(violin_fig, "Distribución de k_est por profesión", height=520, showlegend=False)
+        render_plotly_figure(
+            violin_fig,
+            "violin_kest_profesion",
+            data_df=students_filtered[["profession", "k_est", "k_level", "fw_dom"]],
+            caption="La forma y amplitud de cada distribución permiten revisar dispersión, asimetrías y concentración de puntajes por profesión.",
         )
-        st.plotly_chart(fig2, use_container_width=True)
 
-        sun = students.dropna(subset=["k_level", "fw_dom"]).copy()
-        if not sun.empty:
-            fig3 = px.sunburst(
-                sun,
-                path=["profession", "k_level", "fw_dom"],
-                title="Profesión → nivel → marco dominante",
-                height=550,
-            )
-            st.plotly_chart(fig3, use_container_width=True)
-
-        sank = students.dropna(subset=["profession", "fw_dom"]).copy()
-        if not sank.empty:
-            left = sank["profession"].unique().tolist()
-            right = sank["fw_dom"].unique().tolist()
-            nodes = left + right
-            idx = {label: i for i, label in enumerate(nodes)}
-            links = sank.groupby(["profession", "fw_dom"]).size().reset_index(name="value")
-            fig4 = go.Figure(data=[go.Sankey(
-                node=dict(label=nodes),
-                link=dict(
-                    source=[idx[s] for s in links["profession"]],
-                    target=[idx[t] for t in links["fw_dom"]],
-                    value=links["value"].tolist(),
-                ),
-            )])
-            fig4.update_layout(title="Profesión → marco dominante", height=500)
-            st.plotly_chart(fig4, use_container_width=True)
-
-        pca_data = students.dropna(subset=[f"fw_{fw}" for fw in FRAMEWORKS]).copy()
-        if len(pca_data) >= 6:
-            X = pca_data[[f"fw_{fw}" for fw in FRAMEWORKS]].to_numpy(float)
-            Xc = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-9)
-            coords = PCA(n_components=2, random_state=RANDOM_SEED).fit_transform(Xc)
-            k = min(4, max(2, int(np.sqrt(len(pca_data)))))
-            clusters = KMeans(n_clusters=k, random_state=RANDOM_SEED, n_init=10).fit_predict(coords)
-            plot_df = pca_data[["profession", "k_level"]].copy()
-            plot_df["PC1"] = coords[:, 0]
-            plot_df["PC2"] = coords[:, 1]
-            plot_df["cluster"] = clusters.astype(str)
-            fig5 = px.scatter(
-                plot_df,
-                x="PC1",
-                y="PC2",
-                color="profession",
-                symbol="cluster",
-                title="Mapa exploratorio de perfiles morales (PCA + clusters)",
-                height=520,
-            )
-            st.plotly_chart(fig5, use_container_width=True)
+        if framework_summary.empty:
+            st.info("No hay datos suficientes para consolidar el heatmap y el radar comparativo por profesión.")
         else:
-            st.info("Se requieren al menos 6 participantes completos para PCA y clustering.")
+            prof_col1, prof_col2 = st.columns([1.15, 1])
+            with prof_col1:
+                framework_heatmap = make_framework_heatmap(framework_summary, profession_order)
+                render_plotly_figure(
+                    framework_heatmap,
+                    "heatmap_marcos_profesion",
+                    data_df=framework_summary,
+                    caption="Comparación de la intensidad promedio de cada marco ético entre profesiones.",
+                )
+            with prof_col2:
+                default_radar_professions = profession_distribution.head(min(4, len(profession_distribution)))["profession"].tolist()
+                selected_radar_professions = st.multiselect(
+                    "Profesiones para radar comparativo",
+                    options=profession_order,
+                    default=default_radar_professions,
+                )
+                if len(selected_radar_professions) < 2:
+                    st.info("Selecciona al menos dos profesiones para el radar comparativo.")
+                else:
+                    radar_fig = make_collective_radar(framework_summary, selected_radar_professions)
+                    radar_export = framework_summary[framework_summary["profession"].isin(selected_radar_professions)].copy()
+                    render_plotly_figure(
+                        radar_fig,
+                        "radar_comparativo_profesiones",
+                        data_df=radar_export,
+                        caption="Comparación de perfiles medios de marcos éticos entre profesiones seleccionadas.",
+                    )
 
-    with tab2:
-        prof_table = students.groupby("profession").agg(
-            n=("anon_id", "count"),
-            k_est_promedio=("k_est", "mean"),
-            k_est_de=("k_est", "std"),
-            coherencia_promedio=("k_coherence_std", "mean"),
-            marco_dominante=("fw_dom", lambda x: x.mode().iloc[0] if x.notna().any() else None),
-        ).reset_index().sort_values("n", ascending=False)
-        st.dataframe(prof_table, use_container_width=True)
-
-        gap = profession_gap_table(students)
-        if gap.empty:
-            st.info("Se requieren al menos dos profesiones con datos para comparar brechas.")
+        st.markdown("#### Comparaciones descriptivas entre profesiones")
+        if profession_comparisons.empty:
+            st.info("Se requieren al menos dos profesiones con suficiente tamaño muestral para estimar comparaciones y tamaños de efecto.")
         else:
-            st.dataframe(gap, use_container_width=True)
-            p1, p2 = students["profession"].value_counts().index[:2]
-            radar = go.Figure()
-            radar.add_trace(go.Scatterpolar(
-                r=[gap.loc[gap["framework"] == fw, f"{p1}_mean"].values[0] for fw in FRAMEWORKS],
-                theta=FRAMEWORKS,
-                fill="toself",
-                name=p1,
-            ))
-            radar.add_trace(go.Scatterpolar(
-                r=[gap.loc[gap["framework"] == fw, f"{p2}_mean"].values[0] for fw in FRAMEWORKS],
-                theta=FRAMEWORKS,
-                fill="toself",
-                name=p2,
-            ))
-            radar.update_layout(
-                title=f"Comparación de marcos: {p1} vs {p2}",
-                polar=dict(radialaxis=dict(visible=True, range=[1, 7])),
-                height=500,
+            st.dataframe(profession_comparisons, use_container_width=True)
+            st.caption("Los tamaños de efecto y los intervalos de confianza se interpretan como apoyo descriptivo-formativo y no como prueba concluyente por sí sola.")
+
+    with tabs[3]:
+        st.markdown(
+            """
+            <div class="section-card">
+                <h3>Análisis cualitativo</h3>
+                <p>Integra agrupamientos temáticos, patrones argumentativos y repertorios léxicos para reconocer tendencias discursivas de interés docente e investigador.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        qual_col1, qual_col2 = st.columns([1, 1])
+        with qual_col1:
+            if cluster_summary.empty:
+                st.info("Se requieren más justificaciones textuales para construir gráficos cualitativos robustos.")
+            else:
+                cluster_bar = make_collective_cluster_bar(cluster_summary)
+                render_plotly_figure(
+                    cluster_bar,
+                    "clusters_cualitativos",
+                    data_df=cluster_summary,
+                    caption="Peso relativo y perfil profesional dominante de los clusters cualitativos identificados.",
+                )
+        with qual_col2:
+            if cluster_distribution.empty:
+                st.info("No hay distribución suficiente por profesión para el heatmap cualitativo.")
+            else:
+                cluster_heatmap = px.density_heatmap(
+                    cluster_distribution,
+                    x="cluster",
+                    y="profession",
+                    z="pct",
+                    histfunc="avg",
+                    color_continuous_scale=["#f3f7fb", "#9db9d3", "#1c5f8d", "#0b1f3a"],
+                    title="Distribución de clusters temáticos por profesión (%)",
+                    category_orders={"profession": profession_order},
+                )
+                cluster_heatmap.update_layout(xaxis_title="Cluster", yaxis_title="Profesión", coloraxis_colorbar_title="%")
+                cluster_heatmap = style_academic_figure(cluster_heatmap, "Distribución de clusters temáticos por profesión (%)", height=460)
+                render_plotly_figure(
+                    cluster_heatmap,
+                    "heatmap_clusters_profesion",
+                    data_df=cluster_distribution,
+                    caption="Presencia relativa de cada cluster cualitativo dentro de cada profesión.",
+                )
+
+        st.markdown("#### Palabras clave por profesión")
+        if keyword_df.empty:
+            st.info("No fue posible extraer palabras clave por profesión con la información disponible.")
+        else:
+            st.dataframe(keyword_df, use_container_width=True)
+
+        st.markdown("#### Patrones argumentativos y tendencias interpretativas")
+        q_table1, q_table2 = st.columns([1, 1])
+        with q_table1:
+            if pattern_summary.empty:
+                st.info("No fue posible identificar patrones argumentativos con la información disponible.")
+            else:
+                st.dataframe(pattern_summary, use_container_width=True)
+        with q_table2:
+            if trends_df.empty:
+                st.info("No hay datos suficientes para consolidar tendencias interpretativas por profesión.")
+            else:
+                st.dataframe(trends_df, use_container_width=True)
+
+        with st.expander("Ver muestra de textos procesados"):
+            if processed_texts.empty:
+                st.info("No hay justificaciones textuales suficientes para mostrar ejemplos procesados.")
+            else:
+                st.dataframe(
+                    processed_texts[["profession", "item_id", "text", "texto_limpio"]].head(30),
+                    use_container_width=True,
+                )
+
+    with tabs[4]:
+        st.markdown(
+            """
+            <div class="section-card">
+                <h3>Interpretación integrada</h3>
+                <p>Articula los hallazgos cuantitativos y cualitativos en una lectura final prudente, útil para acompañamiento pedagógico, docencia, investigación educativa y revisión curricular.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        interp_notes = []
+        if not profession_distribution.empty:
+            top_row = profession_distribution.iloc[0]
+            interp_notes.append(
+                f"La mayor representación muestral corresponde a {top_row['profession']} (n={int(top_row['n'])}, {float(top_row['pct']):.1f}%)."
             )
-            st.plotly_chart(radar, use_container_width=True)
-            st.caption("Hedges g cuantifica magnitud de diferencia; úsalo como insumo exploratorio, no como veredicto definitivo.")
+        if not profession_comparisons.empty:
+            strongest_gap = profession_comparisons.iloc[0]
+            if pd.notna(strongest_gap.get("hedges_g")):
+                interp_notes.append(
+                    f"La comparación descriptiva más visible en k_est aparece entre {strongest_gap['profession_a']} y {strongest_gap['profession_b']} con Hedges g={strongest_gap['hedges_g']:.2f}."
+                )
+        if not cluster_summary.empty:
+            lead_cluster = cluster_summary.iloc[0]
+            interp_notes.append(
+                f"El cluster cualitativo de mayor peso es el {int(lead_cluster['cluster'])}, asociado a términos como {lead_cluster['top_terms']}."
+            )
+        if not trends_df.empty:
+            lead_trend = trends_df.iloc[0]
+            interp_notes.append(
+                f"En {lead_trend['profession']} destaca una combinación entre nivel {lead_trend['nivel_dominante']}, marco {lead_trend['marco_dominante']} y patrón {lead_trend['patron_argumentativo']}."
+            )
 
-    with tab3:
-        summary, fig = qualitative_clusters(df_last)
-        if summary.empty:
-            st.info("Se requieren más justificaciones textuales para análisis cualitativo exploratorio.")
-        else:
-            st.dataframe(summary, use_container_width=True)
-            if fig is not None:
-                st.plotly_chart(fig, use_container_width=True)
+        interp_col1, interp_col2 = st.columns([1.2, 1])
+        with interp_col1:
+            st.markdown(f"<div class='interpretation-panel'>{collective_synthesis}</div>", unsafe_allow_html=True)
+        with interp_col2:
+            st.markdown("#### Hallazgos clave")
+            if interp_notes:
+                for note in interp_notes:
+                    st.write(f"- {note}")
+            else:
+                st.info("Aún no hay suficientes regularidades para resumir hallazgos integrados.")
 
-    with tab4:
-        st.dataframe(students, use_container_width=True)
-        st.download_button(
-            "Descargar resumen de participantes (CSV)",
-            data=students.to_csv(index=False).encode("utf-8"),
-            file_name="students_summary.csv",
+            st.markdown("#### Implicaciones de uso")
+            st.write("- Priorizar lectura formativa y comparativa prudente, especialmente cuando algunas profesiones concentran mayor peso muestral.")
+            st.write("- Usar los perfiles éticos y argumentativos como insumo para retroalimentación docente, no como veredicto definitivo sobre el estudiante o profesional.")
+            st.write("- Integrar los hallazgos en revisión curricular, discusión de casos y diseño de actividades de deliberación ética contextualizada.")
+
+        st.markdown("#### Soportes para interpretación")
+        interp_table1, interp_table2 = st.columns([1, 1])
+        with interp_table1:
+            st.dataframe(cohort_summary, use_container_width=True)
+        with interp_table2:
+            st.dataframe(quantitative_report["descriptive_summary"], use_container_width=True)
+
+        st.markdown("#### Exportaciones y trazabilidad")
+        export_col1, export_col2 = st.columns([1, 1])
+        students_export = students_filtered.drop(columns=["group_filter"], errors="ignore")
+        df_last_export = df_last_filtered.drop(columns=["group_filter"], errors="ignore")
+        export_col1.download_button(
+            "Descargar resumen consolidado (CSV)",
+            data=students_export.to_csv(index=False).encode("utf-8"),
+            file_name="students_summary_filtered.csv",
             mime="text/csv",
+            key="students_summary_filtered_csv",
             use_container_width=True,
         )
-        st.download_button(
-            "Descargar última respuesta consolidada (CSV)",
-            data=df_last.to_csv(index=False).encode("utf-8"),
-            file_name="last_attempt_rows.csv",
+        export_col2.download_button(
+            "Descargar filas del último intento (CSV)",
+            data=df_last_export.to_csv(index=False).encode("utf-8"),
+            file_name="last_attempt_rows_filtered.csv",
             mime="text/csv",
+            key="last_attempt_rows_filtered_csv",
             use_container_width=True,
+        )
+        st.info(
+            f"Los archivos del análisis individual y colectivo también se guardan automáticamente en la carpeta administrativa del servidor: {ADMIN_REPORT_STORE.base_dir}."
         )
 
 
@@ -1246,14 +2224,14 @@ def page_deployment() -> None:
 - Migración de `ipywidgets`/Colab a **Streamlit**.
 - Eliminación de dependencias frágiles como `drive.mount()` y `!pip install` dentro del script.
 - Validación mínima de calidad: se exige justificación argumentativa suficiente.
-- Persistencia en CSV con **bloqueo de archivo** cuando `portalocker` está disponible.
+- Persistencia desacoplada con **Supabase/Postgres** como backend principal cuando existe `SUPABASE_DB_URL`, y **SQLite** local como fallback de desarrollo.
 - Dashboard descriptivo más robusto y menos sobreprometedor: mantuve análisis exploratorio y removí predicción poco estable para muestras pequeñas.
 - Exportación directa de resultados para docencia, auditoría o análisis institucional.
 
 ### Advertencia de rigor
 - Esta app funciona bien para enseñanza, formación y análisis exploratorio.
-- En **Streamlit Community Cloud**, los archivos locales pueden perderse si la app reinicia o se redespliega.
-- Para uso institucional serio, conviene reemplazar el CSV por una base persistente: **Supabase, PostgreSQL, Google Sheets o S3**.
+- En **Streamlit Community Cloud**, SQLite local sigue siendo útil para desarrollo o demos, pero la opción recomendada para persistencia real es **Supabase/Postgres**.
+- Para uso institucional serio, configura `SUPABASE_DB_URL` y evita depender del disco efímero del contenedor.
         """
     )
 
@@ -1282,21 +2260,59 @@ moral_test_streamlit/
 
 def page_admin(df: pd.DataFrame) -> None:
     st.subheader("Administración rápida")
-    st.write("Úsalo para revisar el estado actual del almacenamiento local.")
+    st.write("Úsalo para revisar el backend activo y el estado actual de la persistencia.")
     c1, c2, c3 = st.columns(3)
     c1.metric("Filas almacenadas", str(len(df)))
-    c2.metric("Archivo de datos", str(DATA_PATH))
-    c3.metric("Tamaño del archivo", f"{DATA_PATH.stat().st_size / 1024:.1f} KB" if DATA_PATH.exists() else "0 KB")
-    st.caption("En Streamlit Cloud este almacenamiento es efímero. Para persistencia real, cambia el backend.")
+    c2.metric("Backend activo", PERSISTENCE_STORE.backend_name)
+    c3.metric("Detalle", PERSISTENCE_STORE.backend_detail)
+    st.caption("Si existe `SUPABASE_DB_URL`, la app usa Supabase/Postgres. Si no existe, usa SQLite local y puede migrar automáticamente un CSV legado en el primer arranque.")
+    st.caption(f"Carpeta administrativa de reportes: {ADMIN_REPORT_STORE.base_dir}")
+    st.caption("Las secciones Dashboard colectivo y Administración están protegidas por `MORAL_TEST_ADMIN_PASSWORD`.")
+    if ADMIN_REPORT_STORE.drive_url:
+        st.caption(f"Referencia de carpeta administrativa en Drive: {ADMIN_REPORT_STORE.drive_url}")
+    else:
+        st.caption("Para guardar en una carpeta de Google Drive, sincroniza o monta esa carpeta en el servidor y define `MORAL_TEST_ADMIN_REPORTS_DIR` con esa ruta local. Un enlace web de Drive por sí solo no es escribible desde la app.")
     if st.button("Recargar datos", use_container_width=True):
         load_df_cached.clear()
         st.rerun()
+
+    st.markdown("### Catálogo de dilemas de laboratorio")
+    st.write("Revisión docente de los casos específicos para Bacteriología y Microbiología.")
+    route_filter = st.multiselect(
+        "Filtrar por ruta sugerida",
+        options=["Bacteriología", "Microbiología", "Bacteriología / Microbiología"],
+        default=["Bacteriología", "Microbiología", "Bacteriología / Microbiología"],
+    )
+    lab_catalog_rows = []
+    for item in LAB_DILEMMA_CATALOG:
+        if route_filter and item["ruta_sugerida"] not in route_filter:
+            continue
+        dilemma = LOOKUP[item["id"]]
+        lab_catalog_rows.append({
+            "id": item["id"],
+            "ruta_sugerida": item["ruta_sugerida"],
+            "foco": item["foco"],
+            "titulo": dilemma["title"],
+            "planteamiento": dilemma["prompt"],
+            "justificacion_pedagogica": dilemma.get("pedagogical_justification", ""),
+        })
+
+    lab_catalog_df = pd.DataFrame(lab_catalog_rows)
+    st.dataframe(lab_catalog_df, use_container_width=True)
+    st.download_button(
+        "Descargar catálogo de dilemas de laboratorio (CSV)",
+        data=lab_catalog_df.to_csv(index=False).encode("utf-8"),
+        file_name="lab_dilemmas_catalog.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
 
 def main() -> None:
     ensure_storage()
     render_header()
     render_sidebar_branding()
+    render_admin_session_controls()
     df = load_df()
 
     page = st.sidebar.radio(
@@ -1309,11 +2325,13 @@ def main() -> None:
     elif page == "Aplicación individual":
         page_apply(df)
     elif page == "Dashboard colectivo":
-        page_dashboard(df)
+        if admin_login_panel():
+            page_dashboard(df)
     elif page == "Guía de despliegue":
         page_deployment()
     else:
-        page_admin(df)
+        if admin_login_panel():
+            page_admin(df)
 
 
 if __name__ == "__main__":

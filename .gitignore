@@ -8,3 +8,9 @@ venv/
 .DS_Store
 data/*.csv
 data/*.lock
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/admin_reports/
+data/exports/
+.streamlit/secrets.toml

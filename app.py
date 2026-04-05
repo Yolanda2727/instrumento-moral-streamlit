@@ -32,6 +32,7 @@ from services.openai_interpreter import OpenAIInterpreterError, interpret_payloa
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfVectorizer
+from utils.pdf_export import build_individual_report_pdf
 from utils.render_interpretation import render_interpretation_report
 
 # =========================
@@ -56,6 +57,7 @@ APP_SUBTITLE = (
 DEFAULT_ROUTE_SIZE = 8
 MIN_JUSTIFICATION_CHARS = 25
 ADMIN_SESSION_KEY = "admin_authenticated"
+INDIVIDUAL_REPORT_SESSION_KEY = "latest_individual_report"
 AUTHOR_NAME = "Profesor Anderson Díaz Pérez"
 AUTHOR_CREDENTIALS = [
     "Doctor en Bioética",
@@ -1551,6 +1553,343 @@ def build_group_ai_payload(
     }
 
 
+def build_individual_choice_detail_df(choice_df: pd.DataFrame) -> pd.DataFrame:
+    detail_df = choice_df.copy()
+    detail_df["dilema"] = detail_df["item_id"].map(lambda item_id: LOOKUP.get(item_id, {}).get("title", item_id))
+    detail_df["opcion"] = detail_df.apply(
+        lambda row: selected_option_text(str(row["item_id"]), str(row["choice_key"])) or str(row["choice_key"]),
+        axis=1,
+    )
+    detail_df["nivel_moral"] = detail_df["choice_level"].fillna("No disponible").astype(str).str.title()
+    detail_df["marco_etico"] = detail_df["choice_framework"].map(framework_label)
+    return detail_df[["item_id", "dilema", "opcion", "nivel_moral", "marco_etico", "text"]].rename(columns={
+        "item_id": "dilema_id",
+        "text": "justificacion",
+    })
+
+
+def build_framework_score_df(fw_scores: Dict[str, float]) -> pd.DataFrame:
+    rows = []
+    for framework, score in fw_scores.items():
+        rows.append({
+            "marco_etico": framework_label(framework),
+            "puntuacion": round(float(score), 2) if pd.notna(score) else np.nan,
+        })
+    return pd.DataFrame(rows).sort_values("puntuacion", ascending=False, na_position="last")
+
+
+def build_stage_score_df(stage_means: Dict[int, float]) -> pd.DataFrame:
+    return pd.DataFrame([
+        {
+            "estadio": f"Estadio {stage}",
+            "promedio_likert": round(float(stage_means.get(stage, np.nan)), 2) if pd.notna(stage_means.get(stage, np.nan)) else np.nan,
+        }
+        for stage in range(1, 7)
+    ])
+
+
+def build_individual_recommendations(fw_scores: Dict[str, float]) -> List[str]:
+    if not fw_scores:
+        return [
+            "Explicita el principio protegido, la consecuencia esperada y la salvaguarda frente a daño colateral.",
+            "Contrasta tu decisión con al menos un marco ético alternativo para fortalecer la deliberación.",
+        ]
+    ranked_scores = sorted(fw_scores.items(), key=lambda item: (pd.isna(item[1]), -(item[1] if pd.notna(item[1]) else -999)))
+    strongest = framework_label(ranked_scores[0][0])
+    weakest = framework_label(ranked_scores[-1][0])
+    return [
+        f"Reescribe uno de los casos desde el marco {weakest} para contrastarlo con tu tendencia dominante {strongest}.",
+        "Explicita siempre el principio protegido, la consecuencia esperada y la salvaguarda frente a daño colateral.",
+        "En los casos con alta afectación de terceros, incorpora proporcionalidad, transparencia y trazabilidad.",
+    ]
+
+
+def build_individual_summary_text(
+    *,
+    k_level: str | None,
+    k_est: float,
+    fw_dom: str | None,
+    coherence: float,
+    profession: str,
+    route_group: str,
+) -> str:
+    level_text = str(k_level or "sin predominio claro")
+    framework_text = framework_label(fw_dom) if fw_dom else "sin predominio claro"
+    k_est_text = f"{k_est:.2f}" if pd.notna(k_est) else "NA"
+    coherence_text = f"{coherence:.2f}" if pd.notna(coherence) else "NA"
+    return (
+        f"En la ruta individual de {profession} ({route_group}) se observa predominio del nivel {level_text} "
+        f"con un índice global k_est de {k_est_text}. El marco ético dominante fue {framework_text} "
+        f"y la dispersión interna entre estadios fue {coherence_text}, lo que orienta la lectura formativa del reporte."
+    )
+
+
+def create_individual_report_context(
+    *,
+    rows_df: pd.DataFrame,
+    student_id: str,
+    name: str,
+    profession: str,
+    years_experience: int,
+    group: str,
+    route_group: str,
+) -> Dict[str, object]:
+    person = rows_df.copy()
+    choice_df = person[person["row_type"] == "choice"].copy()
+    stage_df = person[person["row_type"] == "stage_likert"].copy()
+    fw_df = person[person["row_type"] == "framework_likert"].copy()
+
+    k_est, k_stage, k_level, stage_means = kohlberg_from_stage_likert(stage_df)
+    fw_scores, fw_dom = framework_scores(fw_df)
+    coherence = float(np.nanstd(list(stage_means.values()))) if stage_means else np.nan
+    timestamp = str(person["timestamp"].iloc[0]) if not person.empty else now_iso()
+    anon_id = str(person["anon_id"].iloc[0]) if not person.empty else sha_id(student_id)
+
+    choice_export_df = choice_df[["item_id", "choice_key", "choice_level", "choice_framework", "text"]].copy()
+    choice_export_df["opcion_texto"] = choice_export_df.apply(
+        lambda row: selected_option_text(str(row["item_id"]), str(row["choice_key"])),
+        axis=1,
+    )
+    choice_export_df["marco_etico"] = choice_export_df["choice_framework"].map(framework_label)
+
+    return {
+        "rows_df": person,
+        "timestamp": timestamp,
+        "anon_id": anon_id,
+        "student_id": student_id,
+        "name": name,
+        "profession": profession,
+        "years_experience": years_experience,
+        "group": group,
+        "route_group": route_group,
+        "choice_df": choice_df,
+        "choice_export_df": choice_export_df,
+        "choice_detail_df": build_individual_choice_detail_df(choice_df),
+        "framework_score_df": build_framework_score_df(fw_scores),
+        "stage_score_df": build_stage_score_df(stage_means),
+        "k_est": k_est,
+        "k_stage": k_stage,
+        "k_level": k_level,
+        "stage_means": stage_means,
+        "fw_scores": fw_scores,
+        "fw_dom": fw_dom,
+        "coherence": coherence,
+        "summary_text": build_individual_summary_text(
+            k_level=k_level,
+            k_est=k_est,
+            fw_dom=fw_dom,
+            coherence=coherence,
+            profession=profession,
+            route_group=route_group,
+        ),
+        "recommendations": build_individual_recommendations(fw_scores),
+        "ai_result": None,
+        "ai_error": None,
+        "pdf_bytes": None,
+        "saved_paths": {},
+    }
+
+
+def run_individual_ai_analysis(report_context: Dict[str, object], spinner_text: str | None = None) -> Dict[str, object]:
+    student_row = pd.Series({
+        "anon_id": report_context["anon_id"],
+        "student_id": report_context["student_id"],
+        "name": report_context["name"],
+        "profession": report_context["profession"],
+        "group": report_context["group"],
+        "years_experience": report_context["years_experience"],
+        "timestamp": report_context["timestamp"],
+    })
+    payload = build_individual_ai_payload(student_row, report_context["rows_df"])
+    try:
+        if spinner_text:
+            with st.spinner(spinner_text):
+                result = interpret_payload(payload, scope="individual")
+        else:
+            result = interpret_payload(payload, scope="individual")
+        report_context["ai_result"] = result
+        report_context["ai_error"] = None
+    except OpenAIInterpreterError as exc:
+        report_context["ai_result"] = None
+        report_context["ai_error"] = str(exc)
+    except Exception as exc:
+        report_context["ai_result"] = None
+        report_context["ai_error"] = f"No fue posible generar la interpretación IA integrada: {exc}"
+    return report_context
+
+
+def rebuild_individual_report_artifacts(report_context: Dict[str, object]) -> Dict[str, object]:
+    dominant_framework = framework_label(report_context["fw_dom"]) if report_context.get("fw_dom") else "No definido"
+    pdf_bytes = build_individual_report_pdf(
+        app_title=APP_TITLE,
+        app_brand_line=APP_BRAND_LINE,
+        author_name=AUTHOR_NAME,
+        author_credentials=AUTHOR_CREDENTIALS,
+        main_function=MAIN_FUNCTION,
+        generated_at=str(report_context["timestamp"]),
+        participant_rows=[
+            ("ID anonimizado", report_context["anon_id"]),
+            ("ID institucional", report_context["student_id"]),
+            ("Nombre o seudónimo", report_context["name"]),
+            ("Profesión", report_context["profession"]),
+            ("Grupo", normalize_group_label(report_context["group"])),
+            ("Años de experiencia", report_context["years_experience"]),
+            ("Ruta profesional", report_context["route_group"]),
+        ],
+        metric_rows=[
+            ("Nivel global", report_context["k_level"]),
+            ("Estadio redondeado", report_context["k_stage"]),
+            ("Índice k_est", report_context["k_est"]),
+            ("Coherencia", report_context["coherence"]),
+            ("Marco dominante", dominant_framework),
+        ],
+        narrative_summary=str(report_context["summary_text"]),
+        recommendations=report_context["recommendations"],
+        framework_scores_df=report_context["framework_score_df"],
+        stage_scores_df=report_context["stage_score_df"],
+        choice_detail_df=report_context["choice_detail_df"],
+        interpretation_result=report_context.get("ai_result"),
+        interpretation_note=report_context.get("ai_error"),
+        figures=[
+            (
+                "Perfil individual de marcos éticos",
+                "Afinidad relativa del participante con los marcos éticos evaluados por el software.",
+                make_radar(report_context["fw_scores"], "Perfil individual de marcos éticos"),
+            ),
+            (
+                "Perfil individual por estadios morales",
+                "Promedios individuales en los ítems tipo Likert vinculados a estadios de razonamiento moral.",
+                make_stage_profile_chart(report_context["stage_means"], "Perfil individual por estadios morales"),
+            ),
+            (
+                "Flujo individual entre dilemas y marcos éticos",
+                "Relación entre los dilemas respondidos y los marcos éticos seleccionados por el participante.",
+                make_sankey_from_choices(report_context["choice_df"], "Dilema → marco ético del participante"),
+            ),
+        ],
+    )
+    report_context["pdf_bytes"] = pdf_bytes
+    report_context["saved_paths"] = ADMIN_REPORT_STORE.save_individual_report(
+        timestamp=str(report_context["timestamp"]),
+        anon_id=str(report_context["anon_id"]),
+        student_id=str(report_context["student_id"]),
+        name=str(report_context["name"]),
+        profession=str(report_context["profession"]),
+        group=str(report_context["group"]),
+        years_experience=int(report_context["years_experience"]),
+        k_est=report_context["k_est"],
+        k_stage=report_context["k_stage"],
+        k_level=report_context["k_level"],
+        coherence=report_context["coherence"],
+        fw_dom=report_context["fw_dom"],
+        fw_scores=report_context["fw_scores"],
+        stage_means=report_context["stage_means"],
+        choice_df=report_context["choice_export_df"],
+        ai_interpretation=report_context.get("ai_result"),
+        pdf_bytes=pdf_bytes,
+    )
+    return report_context
+
+
+def render_individual_report(report_context: Dict[str, object]) -> None:
+    export_name = filename_slug(
+        f"ethoscope_reporte_individual_{report_context['anon_id']}_{str(report_context['timestamp']).replace(':', '-').replace('T', '_')}"
+    )
+    dominant_framework = framework_label(report_context["fw_dom"]) if report_context.get("fw_dom") else "No definido"
+
+    if not report_context.get("pdf_bytes"):
+        report_context = rebuild_individual_report_artifacts(report_context)
+        st.session_state[INDIVIDUAL_REPORT_SESSION_KEY] = report_context
+
+    st.subheader("Reporte individual")
+    st.caption(
+        f"Participante: {report_context['name']} | Profesión: {report_context['profession']} | "
+        f"Grupo: {normalize_group_label(report_context['group'])} | Ruta: {report_context['route_group']}"
+    )
+
+    action_col1, action_col2 = st.columns(2)
+    retry_label = "Regenerar análisis IA integrado" if report_context.get("ai_result") else "Generar o reintentar análisis IA integrado"
+    if action_col1.button(
+        retry_label,
+        key=f"rerun_ai_{report_context['anon_id']}_{report_context['timestamp']}",
+        use_container_width=True,
+    ):
+        updated_context = run_individual_ai_analysis(
+            report_context,
+            spinner_text="Generando análisis IA integrado al reporte individual...",
+        )
+        updated_context = rebuild_individual_report_artifacts(updated_context)
+        st.session_state[INDIVIDUAL_REPORT_SESSION_KEY] = updated_context
+        st.rerun()
+
+    action_col2.download_button(
+        "Descargar reporte completo en PDF",
+        data=report_context["pdf_bytes"],
+        file_name=f"{export_name}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Nivel global", str(report_context["k_level"]))
+    m2.metric("Estadio redondeado", str(report_context["k_stage"]))
+    m3.metric("Índice k_est", f"{report_context['k_est']:.2f}" if pd.notna(report_context["k_est"]) else "NA")
+    m4.metric("Coherencia (DE)", f"{report_context['coherence']:.2f}" if pd.notna(report_context["coherence"]) else "NA")
+    st.caption(f"Marco dominante: {dominant_framework}")
+
+    chart_col1, chart_col2 = st.columns(2)
+    with chart_col1:
+        render_plotly_figure(
+            make_radar(report_context["fw_scores"], "Perfil individual de marcos éticos"),
+            f"radar_reporte_individual_{report_context['anon_id']}",
+            data_df=report_context["framework_score_df"],
+            caption="Afinidad relativa del participante con los marcos éticos evaluados.",
+        )
+    with chart_col2:
+        render_plotly_figure(
+            make_stage_profile_chart(report_context["stage_means"], "Perfil individual por estadios morales"),
+            f"estadios_reporte_individual_{report_context['anon_id']}",
+            data_df=report_context["stage_score_df"],
+            caption="Promedios individuales en los ítems tipo Likert vinculados a estadios morales.",
+        )
+
+    render_plotly_figure(
+        make_sankey_from_choices(report_context["choice_df"], "Dilema → marco ético del participante"),
+        f"sankey_reporte_individual_{report_context['anon_id']}",
+        data_df=report_context["choice_detail_df"],
+        caption="Flujo individual entre dilemas respondidos y marcos éticos escogidos.",
+    )
+
+    table_col1, table_col2 = st.columns(2)
+    with table_col1:
+        st.markdown("### Tabla de marcos éticos")
+        st.dataframe(report_context["framework_score_df"], use_container_width=True, hide_index=True)
+    with table_col2:
+        st.markdown("### Tabla de estadios morales")
+        st.dataframe(report_context["stage_score_df"], use_container_width=True, hide_index=True)
+
+    st.markdown("### Síntesis interpretativa")
+    st.write(report_context["summary_text"])
+
+    st.markdown("### Recomendaciones de mejora argumentativa")
+    st.markdown("\n".join(f"- {item}" for item in report_context["recommendations"]))
+
+    st.markdown("### Análisis IA integrado")
+    if report_context.get("ai_result"):
+        render_interpretation_report(report_context["ai_result"], "Interpretación IA integrada al reporte")
+    elif report_context.get("ai_error"):
+        st.info(report_context["ai_error"])
+
+    with st.expander("Ver detalle de respuestas"):
+        st.dataframe(report_context["choice_detail_df"], use_container_width=True, hide_index=True)
+
+    saved_paths = report_context.get("saved_paths") or {}
+    if saved_paths:
+        st.caption(
+            f"El reporte individual quedó guardado en la carpeta administrativa del servidor: {ADMIN_REPORT_STORE.base_dir}."
+        )
+
+
 def page_ai_interpretation(df: pd.DataFrame) -> None:
     st.subheader("Interpretación IA")
     st.write("Genera interpretación individual y grupal asistida por OpenAI a partir de los resultados consolidados del instrumento.")
@@ -2041,7 +2380,7 @@ def qualitative_clusters(df_last: pd.DataFrame, profession_order: List[str] | No
 # =========================
 def page_apply(df: pd.DataFrame) -> None:
     st.subheader("Aplicación individual")
-    st.write("Completa el instrumento y genera un reporte individual inmediato.")
+    st.write("Completa el instrumento, genera el reporte individual inmediato y obtén análisis IA integrado con exportación PDF.")
     a1, a2, a3 = st.columns(3)
     a1.metric("Profesiones disponibles", str(len(PROFESSION_ROUTES)))
     a2.metric("Marcos éticos evaluados", str(len(FRAMEWORKS)))
@@ -2146,118 +2485,72 @@ def page_apply(df: pd.DataFrame) -> None:
 
         submitted = st.form_submit_button("Guardar respuesta y generar reporte", use_container_width=True)
 
-    if not submitted:
-        return
+    report_context = st.session_state.get(INDIVIDUAL_REPORT_SESSION_KEY)
 
-    errors = []
-    if not student_id.strip():
-        errors.append("Debes diligenciar el ID institucional o código.")
-    if not name.strip():
-        errors.append("Debes diligenciar el nombre o seudónimo.")
+    if submitted:
+        errors = []
+        if not student_id.strip():
+            errors.append("Debes diligenciar el ID institucional o código.")
+        if not name.strip():
+            errors.append("Debes diligenciar el nombre o seudónimo.")
 
-    choices_payload = []
-    for dilemma, selected_label, justification in collected_choices:
-        if not selected_label:
-            errors.append(f"Falta elegir una opción en {dilemma['id']}.")
-            continue
-        clean_just = justification.strip()
-        if len(clean_just) < MIN_JUSTIFICATION_CHARS:
-            errors.append(
-                f"La justificación de {dilemma['id']} es demasiado corta. Usa al menos {MIN_JUSTIFICATION_CHARS} caracteres."
+        choices_payload = []
+        for dilemma, selected_label, justification in collected_choices:
+            if not selected_label:
+                errors.append(f"Falta elegir una opción en {dilemma['id']}.")
+                continue
+            clean_just = justification.strip()
+            if len(clean_just) < MIN_JUSTIFICATION_CHARS:
+                errors.append(
+                    f"La justificación de {dilemma['id']} es demasiado corta. Usa al menos {MIN_JUSTIFICATION_CHARS} caracteres."
+                )
+                continue
+            chosen = selected_label.split(".")[0].strip()
+            option = {o["key"]: o for o in dilemma["options"]}[chosen]
+            choices_payload.append({
+                "item_id": dilemma["id"],
+                "choice_key": chosen,
+                "choice_stage": int(option["stage"]),
+                "choice_level": option["level"],
+                "choice_framework": option["framework"],
+                "text": clean_just,
+            })
+
+        if errors:
+            for error in errors:
+                st.error(error)
+        else:
+            new_rows = build_rows(
+                student_id=student_id.strip(),
+                name=name.strip(),
+                profession=profession,
+                years_experience=int(years_experience),
+                group=group.strip(),
+                anonymize=anonymize,
+                choices_payload=choices_payload,
+                stage_payload=stage_values,
+                framework_payload=framework_values,
             )
-            continue
-        chosen = selected_label.split(".")[0].strip()
-        option = {o["key"]: o for o in dilemma["options"]}[chosen]
-        choices_payload.append({
-            "item_id": dilemma["id"],
-            "choice_key": chosen,
-            "choice_stage": int(option["stage"]),
-            "choice_level": option["level"],
-            "choice_framework": option["framework"],
-            "text": clean_just,
-        })
+            save_attempt_rows(new_rows)
+            report_context = create_individual_report_context(
+                rows_df=new_rows,
+                student_id=student_id.strip(),
+                name=name.strip(),
+                profession=profession,
+                years_experience=int(years_experience),
+                group=group.strip(),
+                route_group=route_group,
+            )
+            report_context = run_individual_ai_analysis(
+                report_context,
+                spinner_text="Generando análisis IA integrado al reporte individual...",
+            )
+            report_context = rebuild_individual_report_artifacts(report_context)
+            st.session_state[INDIVIDUAL_REPORT_SESSION_KEY] = report_context
+            st.success("Respuesta guardada correctamente. El reporte individual ya incluye análisis IA integrado y exportación PDF.")
 
-    if errors:
-        for error in errors:
-            st.error(error)
-        return
-
-    new_rows = build_rows(
-        student_id=student_id.strip(),
-        name=name.strip(),
-        profession=profession,
-        years_experience=int(years_experience),
-        group=group.strip(),
-        anonymize=anonymize,
-        choices_payload=choices_payload,
-        stage_payload=stage_values,
-        framework_payload=framework_values,
-    )
-
-    save_attempt_rows(new_rows)
-    person = new_rows.copy()
-    choice_df = person[person["row_type"] == "choice"].copy()
-    stage_df = person[person["row_type"] == "stage_likert"].copy()
-    fw_df = person[person["row_type"] == "framework_likert"].copy()
-
-    k_est, k_stage, k_level, stage_means = kohlberg_from_stage_likert(stage_df)
-    fw_scores, fw_dom = framework_scores(fw_df)
-    coherence = float(np.nanstd(list(stage_means.values())))
-
-    st.success("Respuesta guardada correctamente.")
-    st.subheader("Reporte individual")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Nivel global", str(k_level))
-    m2.metric("Estadio redondeado", str(k_stage))
-    m3.metric("Índice k_est", f"{k_est:.2f}" if pd.notna(k_est) else "NA")
-    m4.metric("Coherencia (DE)", f"{coherence:.2f}")
-    st.caption(f"Marco dominante: {fw_dom}")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.plotly_chart(make_radar(fw_scores, "Perfil de marcos éticos"), use_container_width=True)
-    with c2:
-        st.plotly_chart(make_sankey_from_choices(choice_df, "Flujo de dilemas hacia marcos seleccionados"), use_container_width=True)
-
-    st.markdown("### Síntesis interpretativa")
-    st.write(
-        f"Se observa predominio del nivel **{k_level}** con un índice global de **{k_est:.2f}**. "
-        f"El marco dominante fue **{fw_dom}** y la dispersión interna de estadios fue **{coherence:.2f}**."
-    )
-
-    recommendation_top = sorted(fw_scores.items(), key=lambda x: (pd.isna(x[1]), -(x[1] or -999)))
-    if recommendation_top:
-        strongest = recommendation_top[0][0]
-        weakest = recommendation_top[-1][0]
-        st.markdown("### Recomendaciones de mejora argumentativa")
-        st.markdown(
-            f"- Reescribe un caso desde el marco **{weakest}** para contrastarlo con tu tendencia dominante **{strongest}**.\n"
-            "- Explicita siempre el principio protegido, la consecuencia esperada y la salvaguarda frente a daño colateral.\n"
-            "- En los casos con alta afectación de terceros, incorpora proporcionalidad, transparencia y trazabilidad."
-        )
-
-    with st.expander("Ver detalle de respuestas"):
-        st.dataframe(choice_df[["item_id", "choice_level", "choice_framework", "text"]], use_container_width=True)
-
-    attempt_timestamp = str(person["timestamp"].iloc[0]) if not person.empty else now_iso()
-    anon_id = str(person["anon_id"].iloc[0]) if not person.empty else sha_id(student_id.strip())
-    ADMIN_REPORT_STORE.save_individual_report(
-        timestamp=attempt_timestamp,
-        anon_id=anon_id,
-        student_id=student_id.strip(),
-        name=name.strip(),
-        profession=profession,
-        group=group.strip(),
-        years_experience=int(years_experience),
-        k_est=k_est,
-        k_stage=k_stage,
-        k_level=k_level,
-        coherence=coherence,
-        fw_dom=fw_dom,
-        fw_scores=fw_scores,
-        stage_means=stage_means,
-        choice_df=choice_df[["item_id", "choice_key", "choice_level", "choice_framework", "text"]].copy(),
-    )
+    if report_context:
+        render_individual_report(report_context)
 
 
 def page_dashboard(df: pd.DataFrame) -> None:

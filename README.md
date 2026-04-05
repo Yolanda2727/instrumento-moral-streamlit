@@ -32,9 +32,11 @@ Valorar de manera formativa cómo estudiantes y profesionales argumentan frente 
 - Subrutas específicas para Bacteriología y Microbiología, con dilemas diferenciados sobre bioseguridad, transporte de muestras, contaminación cruzada, resistencia antimicrobiana, reporte crítico, cultivos, secuenciación e investigación con muestras biológicas.
 - Vista administrativa para revisar y exportar el catálogo de dilemas de laboratorio con foco temático y justificación pedagógica.
 - Reporte individual inmediato.
+- Reporte individual con análisis IA integrado al momento de generarse, cuando OPENAI_API_KEY está configurada.
 - Dashboard colectivo con distribuciones, brechas y análisis cualitativo exploratorio.
 - Nueva sección de Interpretación IA con lectura individual y grupal apoyada por OpenAI.
 - Exportación en CSV para análisis adicional.
+- Exportación en PDF del reporte individual con identidad del software, interpretación, tablas y gráficas.
 
 ## Alcance
 
@@ -108,6 +110,7 @@ data/admin_reports
 Incluye:
 
 - Reportes individuales en JSON y CSV por intento.
+- Reportes individuales completos en PDF con tablas, interpretación y gráficas cuando se genera el reporte desde la app.
 - Snapshots colectivos globales y filtrados para revisión administrativa.
 
 Puedes cambiar la ruta con:

@@ -60,12 +60,16 @@ class AdminReportStore:
         fw_scores: Dict[str, float],
         stage_means: Dict[int, float],
         choice_df: pd.DataFrame,
+        ai_interpretation: Dict[str, Any] | None = None,
+        pdf_bytes: bytes | None = None,
     ) -> Dict[str, str]:
         self.ensure_storage()
         report_id = f"{_safe_timestamp(timestamp)}_{_slugify(anon_id)}"
         report_dir = self.base_dir / "individual"
         json_path = report_dir / f"{report_id}.json"
         csv_path = report_dir / f"{report_id}_choices.csv"
+        interpretation_path = report_dir / f"{report_id}_interpretation.json"
+        pdf_path = report_dir / f"{report_id}_report.pdf"
 
         payload = {
             "timestamp": timestamp,
@@ -86,7 +90,20 @@ class AdminReportStore:
 
         json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         choice_df.to_csv(csv_path, index=False)
-        return {"json": str(json_path), "csv": str(csv_path)}
+        output = {"json": str(json_path), "csv": str(csv_path)}
+
+        if ai_interpretation is not None:
+            interpretation_path.write_text(
+                json.dumps(ai_interpretation, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            output["interpretation_json"] = str(interpretation_path)
+
+        if pdf_bytes is not None:
+            pdf_path.write_bytes(pdf_bytes)
+            output["pdf"] = str(pdf_path)
+
+        return output
 
     def save_collective_snapshot(
         self,

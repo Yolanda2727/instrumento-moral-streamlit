@@ -584,18 +584,18 @@ for item_id, title, prompt, options, pedagogical_justification in lab_cases:
 
 LOOKUP = {d["id"]: d for d in BANK}
 PROFESSION_DEFINITIONS = [
-    {"label": "Medicina", "route_group": "salud"},
-    {"label": "Enfermería", "route_group": "salud"},
-    {"label": "Fisioterapia", "route_group": "salud"},
-    {"label": "Instrumentación Quirúrgica", "route_group": "salud"},
+    {"label": "Medicina", "route_group": "medicina"},
+    {"label": "Enfermería", "route_group": "enfermeria"},
+    {"label": "Fisioterapia", "route_group": "fisioterapia"},
+    {"label": "Instrumentación Quirúrgica", "route_group": "instrumentacion_quirurgica"},
     {"label": "Bacteriología", "route_group": "bacteriologia_laboratorio"},
     {"label": "Microbiología", "route_group": "microbiologia_laboratorio"},
-    {"label": "Derecho", "route_group": "social_juridica"},
-    {"label": "Ciencias Sociales", "route_group": "social_juridica"},
-    {"label": "Educación", "route_group": "social_juridica"},
-    {"label": "Ingeniería", "route_group": "ingenieria_ti_datos"},
-    {"label": "TI", "route_group": "ingenieria_ti_datos"},
-    {"label": "Datos", "route_group": "ingenieria_ti_datos"},
+    {"label": "Derecho", "route_group": "derecho"},
+    {"label": "Ciencias Sociales", "route_group": "ciencias_sociales"},
+    {"label": "Educación", "route_group": "educacion"},
+    {"label": "Ingeniería", "route_group": "ingenieria"},
+    {"label": "TI", "route_group": "ti"},
+    {"label": "Datos", "route_group": "datos"},
     {"label": "Otra / Mixta", "route_group": "mixta"},
 ]
 
@@ -603,10 +603,20 @@ PROFESSION_OPTIONS = [definition["label"] for definition in PROFESSION_DEFINITIO
 
 ROUTE_BANKS = {
     "salud": ["K1", "K2", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8"],
+    "medicina": ["H1", "H3", "H2", "H5", "H6", "H7", "H8", "H4", "K1", "K2"],
+    "enfermeria": ["H2", "H5", "H6", "H3", "H1", "H7", "H4", "H8", "K1", "K2"],
+    "fisioterapia": ["H3", "H5", "H7", "H2", "H6", "H4", "H1", "H8", "K1", "K2"],
+    "instrumentacion_quirurgica": ["H4", "H7", "H2", "H6", "H1", "H5", "H8", "H3", "K1", "K2"],
     "bacteriologia_laboratorio": ["BM10", "BM2", "BM3", "BM9", "BM5", "BM4", "BM6", "BM8", "K1", "K2"],
     "microbiologia_laboratorio": ["BM1", "BM7", "BM3", "BM4", "BM5", "BM12", "BM11", "BM8", "K1", "K2"],
     "social_juridica": ["K1", "K2", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"],
+    "derecho": ["L1", "L2", "L6", "L7", "L8", "L3", "L5", "L4", "K1", "K2"],
+    "ciencias_sociales": ["L3", "L5", "L6", "L8", "L1", "L4", "L7", "L2", "K1", "K2"],
+    "educacion": ["L4", "L3", "L5", "L8", "L6", "L1", "L2", "L7", "K1", "K2"],
     "ingenieria_ti_datos": ["K1", "K2", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"],
+    "ingenieria": ["T1", "T4", "T5", "T8", "T2", "T6", "T3", "T7", "K1", "K2"],
+    "ti": ["T4", "T6", "T3", "T7", "T8", "T1", "T2", "T5", "K1", "K2"],
+    "datos": ["T2", "T3", "T5", "T8", "T6", "T7", "T4", "T1", "K1", "K2"],
     "mixta": ["K1", "K2", "H1", "L1", "T1", "H4", "L4", "T2"],
 }
 

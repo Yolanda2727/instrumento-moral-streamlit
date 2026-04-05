@@ -583,21 +583,23 @@ for item_id, title, prompt, options, pedagogical_justification in lab_cases:
     BANK.append(make_dilemma(item_id, title, prompt, options, STAGE_TEMPLATE, pedagogical_justification))
 
 LOOKUP = {d["id"]: d for d in BANK}
-PROFESSION_OPTIONS = [
-    "Medicina",
-    "Enfermería",
-    "Fisioterapia",
-    "Instrumentación Quirúrgica",
-    "Bacteriología",
-    "Microbiología",
-    "Derecho",
-    "Ciencias Sociales",
-    "Educación",
-    "Ingeniería",
-    "TI",
-    "Datos",
-    "Otra / Mixta",
+PROFESSION_DEFINITIONS = [
+    {"label": "Medicina", "route_group": "salud"},
+    {"label": "Enfermería", "route_group": "salud"},
+    {"label": "Fisioterapia", "route_group": "salud"},
+    {"label": "Instrumentación Quirúrgica", "route_group": "salud"},
+    {"label": "Bacteriología", "route_group": "bacteriologia_laboratorio"},
+    {"label": "Microbiología", "route_group": "microbiologia_laboratorio"},
+    {"label": "Derecho", "route_group": "social_juridica"},
+    {"label": "Ciencias Sociales", "route_group": "social_juridica"},
+    {"label": "Educación", "route_group": "social_juridica"},
+    {"label": "Ingeniería", "route_group": "ingenieria_ti_datos"},
+    {"label": "TI", "route_group": "ingenieria_ti_datos"},
+    {"label": "Datos", "route_group": "ingenieria_ti_datos"},
+    {"label": "Otra / Mixta", "route_group": "mixta"},
 ]
+
+PROFESSION_OPTIONS = [definition["label"] for definition in PROFESSION_DEFINITIONS]
 
 ROUTE_BANKS = {
     "salud": ["K1", "K2", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8"],
@@ -609,19 +611,8 @@ ROUTE_BANKS = {
 }
 
 PROFESSION_ROUTE_GROUPS = {
-    "Medicina": "salud",
-    "Enfermería": "salud",
-    "Fisioterapia": "salud",
-    "Instrumentación Quirúrgica": "salud",
-    "Bacteriología": "bacteriologia_laboratorio",
-    "Microbiología": "microbiologia_laboratorio",
-    "Derecho": "social_juridica",
-    "Ciencias Sociales": "social_juridica",
-    "Educación": "social_juridica",
-    "Ingeniería": "ingenieria_ti_datos",
-    "TI": "ingenieria_ti_datos",
-    "Datos": "ingenieria_ti_datos",
-    "Otra / Mixta": "mixta",
+    definition["label"]: definition["route_group"]
+    for definition in PROFESSION_DEFINITIONS
 }
 
 LEGACY_PROFESSION_LABELS = {
@@ -634,12 +625,49 @@ PROFESSION_ALIASES = {
     "Salud (medicina/enfermería/fisioterapia/instrumentación)": "Salud (legado)",
     "Derecho / Ciencias sociales / Educación": "Derecho / Ciencias Sociales / Educación (legado)",
     "Ingeniería / TI / Datos": "Ingeniería / TI / Datos (legado)",
+    "Bacteriologia": "Bacteriología",
+    "Microbiologia": "Microbiología",
+    "Instrumentacion Quirurgica": "Instrumentación Quirúrgica",
 }
 
 PROFESSION_ROUTES = {
     profession: ROUTE_BANKS[route_group]
     for profession, route_group in PROFESSION_ROUTE_GROUPS.items()
 }
+
+
+def validate_profession_routes() -> None:
+    required_professions = ["Bacteriología", "Microbiología"]
+    for profession in required_professions:
+        route_group = PROFESSION_ROUTE_GROUPS.get(profession)
+        if not route_group:
+            raise ValueError(f"La profesión {profession} no tiene un grupo de ruta configurado.")
+
+        route_ids = ROUTE_BANKS.get(route_group, [])
+        if not route_ids:
+            raise ValueError(f"La ruta {route_group} no tiene dilemas asignados para {profession}.")
+
+        missing_ids = [item_id for item_id in route_ids if item_id not in LOOKUP]
+        if missing_ids:
+            raise ValueError(
+                f"La ruta {route_group} de {profession} referencia dilemas inexistentes: {', '.join(missing_ids)}."
+            )
+
+        if len(route_ids) < DEFAULT_ROUTE_SIZE:
+            raise ValueError(
+                f"La ruta {route_group} de {profession} tiene {len(route_ids)} dilemas y requiere al menos {DEFAULT_ROUTE_SIZE}."
+            )
+
+    for profession, route_group in PROFESSION_ROUTE_GROUPS.items():
+        route_ids = ROUTE_BANKS.get(route_group, [])
+        missing_ids = [item_id for item_id in route_ids if item_id not in LOOKUP]
+        if missing_ids:
+            raise ValueError(
+                f"La profesión {profession} tiene referencias inválidas en su ruta {route_group}: {', '.join(missing_ids)}."
+            )
+
+
+validate_profession_routes()
 
 PROFESSION_DISPLAY_ORDER = PROFESSION_OPTIONS + list(LEGACY_PROFESSION_LABELS.keys())
 
@@ -1802,19 +1830,36 @@ def page_apply(df: pd.DataFrame) -> None:
         route_size = st.slider("Número de dilemas por ruta", min_value=4, max_value=10, value=DEFAULT_ROUTE_SIZE, step=1)
         anonymize = st.checkbox("Anonimizar identificador", value=True)
 
+    st.markdown("### Configuración de la ruta profesional")
+    route_col1, route_col2 = st.columns([2, 1])
+    profession = route_col1.selectbox(
+        "Profesión",
+        options=PROFESSION_OPTIONS,
+        key="apply_profession_selector",
+    )
+    years_experience = route_col2.number_input(
+        "Años de experiencia",
+        min_value=0,
+        max_value=60,
+        value=0,
+        step=1,
+        key="apply_years_experience",
+    )
+
+    route_group = route_group_for_profession(profession)
+    full_route_ids = ROUTE_BANKS.get(route_group, [])
+    dilemmas = route_for_profession(profession, route_size)
+
+    st.caption(
+        f"Profesión seleccionada: {profession} | Ruta activa: {route_group} | Dilemas visibles: {len(dilemmas)}"
+    )
+
     with st.form("moral_test_form", clear_on_submit=False):
         c1, c2, c3 = st.columns([1, 1, 1])
         student_id = c1.text_input("ID institucional o código", max_chars=60)
         name = c2.text_input("Nombre o seudónimo", max_chars=120)
         group = c3.text_input("Grupo / cohorte / curso", max_chars=120)
 
-        c4, c5 = st.columns([2, 1])
-        profession = c4.selectbox("Profesión", options=PROFESSION_OPTIONS)
-        years_experience = c5.number_input("Años de experiencia", min_value=0, max_value=60, value=0, step=1)
-
-        route_group = route_group_for_profession(profession)
-        full_route_ids = ROUTE_BANKS.get(route_group, [])
-        dilemmas = route_for_profession(profession, route_size)
         st.markdown("### A. Dilemas y justificación argumentativa")
         st.caption("Se exige una justificación breve con razonamiento suficiente; evita respuestas telegráficas.")
         if route_group in {"bacteriologia_laboratorio", "microbiologia_laboratorio"}:

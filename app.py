@@ -28,9 +28,11 @@ from analysis_module import (
     profession_interpretive_trends,
 )
 from persistence import COLUMNS, load_persistence_store
+from services.openai_interpreter import OpenAIInterpreterError, interpret_payload
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfVectorizer
+from utils.render_interpretation import render_interpretation_report
 
 # =========================
 # Configuración general
@@ -1434,6 +1436,220 @@ def filename_slug(value: str) -> str:
     return text.strip("_") or "grafica"
 
 
+def serialize_for_ai(value):
+    if isinstance(value, (np.floating, float)):
+        if pd.isna(value):
+            return None
+        return float(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if pd.isna(value):
+        return None
+    return value
+
+
+def selected_option_text(item_id: str, choice_key: str) -> str | None:
+    dilemma = LOOKUP.get(item_id)
+    if not dilemma:
+        return None
+    for option in dilemma["options"]:
+        if option["key"] == choice_key:
+            return option["text"]
+    return None
+
+
+def build_individual_ai_payload(student_row: pd.Series, rows: pd.DataFrame) -> Dict[str, object]:
+    choice_df = rows[rows["row_type"] == "choice"].copy()
+    stage_df = rows[rows["row_type"] == "stage_likert"].copy()
+    fw_df = rows[rows["row_type"] == "framework_likert"].copy()
+    k_est, k_stage, k_level, stage_means = kohlberg_from_stage_likert(stage_df)
+    fw_scores, fw_dom = framework_scores(fw_df)
+    coherence = float(np.nanstd(list(stage_means.values()))) if stage_means else np.nan
+
+    dilemmas = []
+    for _, row in choice_df.iterrows():
+        dilemmas.append({
+            "item_id": row["item_id"],
+            "titulo": LOOKUP.get(row["item_id"], {}).get("title"),
+            "planteamiento": LOOKUP.get(row["item_id"], {}).get("prompt"),
+            "opcion_seleccionada": row["choice_key"],
+            "texto_opcion": selected_option_text(str(row["item_id"]), str(row["choice_key"])),
+            "estadio_opcion": serialize_for_ai(row["choice_stage"]),
+            "nivel_opcion": row["choice_level"],
+            "marco_opcion": row["choice_framework"],
+            "justificacion": row["text"],
+        })
+
+    return {
+        "tipo_analisis": "individual",
+        "participante": {
+            "anon_id": student_row["anon_id"],
+            "student_id": student_row.get("student_id"),
+            "nombre": student_row.get("name"),
+            "profesion": student_row.get("profession"),
+            "grupo": normalize_group_label(student_row.get("group")),
+            "anos_experiencia": serialize_for_ai(student_row.get("years_experience")),
+            "timestamp": student_row.get("timestamp"),
+        },
+        "dilemas_respondidos": dilemmas,
+        "indicadores": {
+            "indice_k_est": serialize_for_ai(k_est),
+            "estadio_redondeado": serialize_for_ai(k_stage),
+            "nivel_dominante": k_level,
+            "marco_dominante": fw_dom,
+            "coherencia": serialize_for_ai(coherence),
+            "n_dilemas": int(len(choice_df)),
+            "stage_means": {str(key): serialize_for_ai(value) for key, value in stage_means.items()},
+            "framework_scores": {key: serialize_for_ai(value) for key, value in fw_scores.items()},
+        },
+    }
+
+
+def build_group_ai_payload(
+    students_filtered: pd.DataFrame,
+    df_last_filtered: pd.DataFrame,
+    quantitative_report: Dict[str, pd.DataFrame],
+    keyword_df: pd.DataFrame,
+    pattern_summary: pd.DataFrame,
+    trends_df: pd.DataFrame,
+) -> Dict[str, object]:
+    choice_df = df_last_filtered[df_last_filtered["row_type"] == "choice"].copy()
+    sample_choices = []
+    for _, row in choice_df.head(12).iterrows():
+        sample_choices.append({
+            "anon_id": row["anon_id"],
+            "profesion": row["profession"],
+            "item_id": row["item_id"],
+            "titulo": LOOKUP.get(row["item_id"], {}).get("title"),
+            "opcion": row["choice_key"],
+            "texto_opcion": selected_option_text(str(row["item_id"]), str(row["choice_key"])),
+            "nivel_opcion": row["choice_level"],
+            "marco_opcion": row["choice_framework"],
+            "justificacion": row["text"],
+        })
+
+    profession_distribution = quantitative_report.get("profession_distribution", pd.DataFrame())
+    framework_summary = quantitative_report.get("framework_summary", pd.DataFrame())
+    stage_summary = quantitative_report.get("stage_summary", pd.DataFrame())
+    descriptive_summary = quantitative_report.get("descriptive_summary", pd.DataFrame())
+
+    return {
+        "tipo_analisis": "grupal",
+        "resumen_muestra": {
+            "n_participantes": int(len(students_filtered)),
+            "profesiones": sorted(students_filtered["profession"].dropna().astype(str).unique().tolist()),
+            "grupos": sorted(students_filtered["group"].fillna("Sin grupo").astype(str).unique().tolist()),
+        },
+        "distribucion_profesion": profession_distribution.to_dict(orient="records"),
+        "marcos_por_profesion": framework_summary.to_dict(orient="records"),
+        "estadios_por_profesion": stage_summary.to_dict(orient="records"),
+        "resumen_descriptivo": descriptive_summary.to_dict(orient="records"),
+        "tendencias_profesion": trends_df.to_dict(orient="records"),
+        "palabras_clave": keyword_df.to_dict(orient="records"),
+        "patrones_argumentativos": pattern_summary.to_dict(orient="records"),
+        "muestra_justificaciones": sample_choices,
+    }
+
+
+def page_ai_interpretation(df: pd.DataFrame) -> None:
+    st.subheader("Interpretación IA")
+    st.write("Genera interpretación individual y grupal asistida por OpenAI a partir de los resultados consolidados del instrumento.")
+
+    if df.empty:
+        st.warning("Aún no hay respuestas registradas para interpretar.")
+        return
+
+    students, df_last = student_table(df)
+    if students.empty:
+        st.warning("No fue posible consolidar participantes para la interpretación IA.")
+        return
+
+    tabs = st.tabs(["1. Interpretación individual", "2. Interpretación grupal"])
+
+    with tabs[0]:
+        participant_df = students[["anon_id", "name", "student_id", "profession", "group", "timestamp"]].copy()
+        participant_df["display_label"] = participant_df.apply(
+            lambda row: f"{row['name'] or row['student_id'] or row['anon_id'][:8]} | {row['profession']} | {normalize_group_label(row['group'])}",
+            axis=1,
+        )
+        selected_label = st.selectbox("Participante para interpretación IA", options=participant_df["display_label"].tolist(), key="ai_individual_select")
+        selected_anon = participant_df.loc[participant_df["display_label"] == selected_label, "anon_id"].iloc[0]
+        student_row = students[students["anon_id"] == selected_anon].iloc[0]
+        selected_rows = df_last[df_last["anon_id"] == selected_anon].copy()
+
+        if st.button("Generar interpretación IA individual", use_container_width=True):
+            payload = build_individual_ai_payload(student_row, selected_rows)
+            try:
+                with st.spinner("Consultando OpenAI para interpretación individual..."):
+                    result = interpret_payload(payload, scope="individual")
+                render_interpretation_report(result, "Interpretación IA individual")
+            except OpenAIInterpreterError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"No fue posible generar la interpretación IA individual: {exc}")
+
+    with tabs[1]:
+        students = students.copy()
+        df_last = df_last.copy()
+        students["group_filter"] = students["group"].apply(normalize_group_label)
+        profession_options = [
+            value for value in profession_category_order(students["profession"])
+            if value in students["profession"].dropna().astype(str).unique().tolist()
+        ]
+        group_options = sorted(students["group_filter"].dropna().astype(str).unique().tolist())
+        year_values = students["years_experience"].dropna().astype(float)
+        year_min = int(year_values.min()) if not year_values.empty else 0
+        year_max = int(year_values.max()) if not year_values.empty else 0
+
+        filter_col1, filter_col2, filter_col3 = st.columns([1.4, 1.2, 1.2])
+        selected_professions = filter_col1.multiselect("Profesiones", options=profession_options, default=profession_options, key="ai_group_professions")
+        selected_groups = filter_col2.multiselect("Grupos / cohortes", options=group_options, default=group_options, key="ai_group_groups")
+        if year_min < year_max:
+            selected_year_range = filter_col3.slider("Años de experiencia", min_value=year_min, max_value=year_max, value=(year_min, year_max), key="ai_group_years")
+        else:
+            filter_col3.caption(f"Años de experiencia: {year_min}")
+            selected_year_range = (year_min, year_max)
+
+        students_filtered, df_last_filtered = apply_dashboard_filters(
+            students,
+            df_last,
+            selected_professions,
+            selected_groups,
+            selected_year_range,
+        )
+        if students_filtered.empty:
+            st.info("Los filtros actuales no dejan muestra disponible para interpretación grupal.")
+        elif st.button("Generar interpretación IA grupal", use_container_width=True):
+            quantitative_report = build_quantitative_report(
+                students_filtered.drop(columns=["group_filter"], errors="ignore"),
+                df_last_filtered.drop(columns=["group_filter"], errors="ignore"),
+                FRAMEWORKS,
+            )
+            keyword_df = extract_keywords_by_group(df_last_filtered, BASE_STOPWORDS, group_col="profession")
+            pattern_summary = argumentative_pattern_table(df_last_filtered, BASE_STOPWORDS)
+            trends_df = profession_interpretive_trends(
+                students_filtered.drop(columns=["group_filter"], errors="ignore"),
+                keyword_df,
+                pattern_summary,
+            )
+            payload = build_group_ai_payload(
+                students_filtered.drop(columns=["group_filter"], errors="ignore"),
+                df_last_filtered.drop(columns=["group_filter"], errors="ignore"),
+                quantitative_report,
+                keyword_df,
+                pattern_summary,
+                trends_df,
+            )
+            try:
+                with st.spinner("Consultando OpenAI para interpretación grupal..."):
+                    result = interpret_payload(payload, scope="grupal")
+                render_interpretation_report(result, "Interpretación IA grupal")
+            except OpenAIInterpreterError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"No fue posible generar la interpretación IA grupal: {exc}")
+
+
 def dataframe_to_excel_bytes(sheet_map: Dict[str, pd.DataFrame]) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -2831,7 +3047,7 @@ def main() -> None:
 
     page = st.sidebar.radio(
         "Navegación",
-        ["Presentación del programa", "Aplicación individual", "Dashboard colectivo", "Guía de despliegue", "Administración"],
+        ["Presentación del programa", "Aplicación individual", "Dashboard colectivo", "Interpretación IA", "Guía de despliegue", "Administración"],
     )
 
     if page == "Presentación del programa":
@@ -2841,6 +3057,9 @@ def main() -> None:
     elif page == "Dashboard colectivo":
         if admin_login_panel():
             page_dashboard(df)
+    elif page == "Interpretación IA":
+        if admin_login_panel():
+            page_ai_interpretation(df)
     elif page == "Guía de despliegue":
         page_deployment()
     else:

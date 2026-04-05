@@ -33,6 +33,7 @@ Valorar de manera formativa cómo estudiantes y profesionales argumentan frente 
 - Vista administrativa para revisar y exportar el catálogo de dilemas de laboratorio con foco temático y justificación pedagógica.
 - Reporte individual inmediato.
 - Dashboard colectivo con distribuciones, brechas y análisis cualitativo exploratorio.
+- Nueva sección de Interpretación IA con lectura individual y grupal apoyada por OpenAI.
 - Exportación en CSV para análisis adicional.
 
 ## Alcance
@@ -134,6 +135,13 @@ export MORAL_TEST_ADMIN_PASSWORD="tu-clave-segura"
 
 También puedes definirla en `st.secrets` si despliegas en Streamlit Community Cloud.
 
+La interpretación IA requiere además:
+
+```toml
+OPENAI_API_KEY = "tu-clave-openai"
+OPENAI_MODEL = "gpt-4.1-mini"
+```
+
 Para desarrollo local ya puedes usar el archivo:
 
 ```text
@@ -144,6 +152,8 @@ con este valor mínimo:
 
 ```toml
 MORAL_TEST_ADMIN_PASSWORD = "cambia-esto-por-una-clave-segura"
+OPENAI_API_KEY = "tu-clave-openai"
+OPENAI_MODEL = "gpt-4.1-mini"
 ```
 
 ## Despliegue en Streamlit Community Cloud

@@ -15,22 +15,40 @@ ARGUMENT_PATTERN_LEXICONS = {
     "consecuencias": {
         "beneficio", "beneficios", "riesgo", "riesgos", "impacto", "resultado", "resultados",
         "consecuencia", "consecuencias", "efecto", "efectos", "eficacia", "daño", "danos", "bienestar",
+        "perjuicio", "utilidad", "seguridad", "calidad", "costo", "costos", "beneficioso",
+        "perjudicial", "perdida", "pérdida", "ganancia", "maximizar", "minimizar",
     },
     "normas": {
         "norma", "normas", "regla", "reglas", "protocolo", "protocolos", "deber", "deberes",
         "obligacion", "obligaciones", "cumplir", "legal", "ley", "leyes", "procedimiento",
+        "reglamento", "normativa", "política", "politica", "estandar", "estándar", "codigo",
+        "código", "cumplimiento", "sancion", "sanción", "disposicion", "disposición",
+        "incumplimiento", "autoridad", "mandato",
     },
     "cuidado": {
         "cuidado", "vulnerable", "vulnerables", "empatía", "empatia", "acompanamiento", "acompañamiento",
         "relacion", "relaciones", "sufrimiento", "proteger", "apoyo", "familia", "equipo",
+        "compasion", "compasión", "sensibilidad", "atencion", "atención", "solidaridad",
+        "humanizar", "humano", "confianza", "proteccion", "protección",
     },
     "justicia": {
         "justicia", "equidad", "derechos", "derecho", "dignidad", "proporcionalidad", "imparcialidad",
         "transparencia", "responsabilidad", "garantia", "garantias", "publico", "consenso",
+        "igualdad", "justo", "injusto", "acceso", "inclusion", "inclusión", "discriminacion",
+        "discriminación", "autonomia", "autonomía", "consentimiento", "trato",
     },
     "integridad": {
         "integridad", "honestidad", "verdad", "prudencia", "caracter", "carácter", "virtud", "virtudes",
         "coherencia", "responsable", "responsabilidad", "etico", "ético",
+        "veracidad", "transparente", "confiable", "principio", "principios",
+        "compromiso", "lealtad", "autenticidad", "credibilidad",
+    },
+    "bioseguridad_calidad": {
+        "bioseguridad", "esterilidad", "contaminacion", "contaminación", "muestra", "muestras",
+        "cabina", "aislamiento", "resistencia", "antibiotico", "antibiótico", "cultivo", "cultivos",
+        "cepa", "cepas", "laboratorio", "preanalitico", "preanalítico", "analitico", "analítico",
+        "postanalitico", "postanalítico", "trazabilidad", "validez", "confiabilidad",
+        "precision", "precisión", "informe", "reporte",
     },
 }
 
@@ -73,6 +91,7 @@ def build_quantitative_report(students: pd.DataFrame, df_last: pd.DataFrame, fra
             "profession_distribution": empty,
             "stage_summary": empty,
             "framework_summary": empty,
+            "framework_ci_summary": empty,
             "dominant_levels": empty,
             "profession_comparisons": empty,
             "cohort_summary": empty,
@@ -107,6 +126,23 @@ def build_quantitative_report(students: pd.DataFrame, df_last: pd.DataFrame, fra
     else:
         framework_summary = pd.DataFrame()
     report["framework_summary"] = framework_summary
+
+    fw_ci_rows = []
+    for fw in frameworks:
+        fw_col = f"fw_{fw}"
+        if fw_col not in students.columns:
+            continue
+        for profession, g in students.groupby("profession"):
+            values = g[fw_col].dropna().values
+            mean, low, high = bootstrap_ci(values)
+            fw_ci_rows.append({
+                "profession": profession,
+                "framework": fw,
+                "fw_mean": round(float(mean), 3) if pd.notna(mean) else np.nan,
+                "ci_low": round(float(low), 3) if pd.notna(low) else np.nan,
+                "ci_high": round(float(high), 3) if pd.notna(high) else np.nan,
+            })
+    report["framework_ci_summary"] = pd.DataFrame(fw_ci_rows)
 
     dominant_levels = students[["anon_id", "profession", "group", "k_level", "k_stage", "fw_dom", "choice_level_mode", "choice_fw_mode"]].copy()
     dominant_levels = dominant_levels.rename(columns={
@@ -170,6 +206,8 @@ def build_quantitative_report(students: pd.DataFrame, df_last: pd.DataFrame, fra
             "n": int(len(values)),
             "mean": float(np.mean(values)),
             "median": float(np.median(values)),
+            "p25": float(np.percentile(values, 25)),
+            "p75": float(np.percentile(values, 75)),
             "sd": float(np.std(values, ddof=1)) if len(values) > 1 else np.nan,
             "min": float(np.min(values)),
             "max": float(np.max(values)),
@@ -195,6 +233,31 @@ def extract_keywords_by_group(df_last: pd.DataFrame, stopwords: Sequence[str], g
     if choices.empty:
         return pd.DataFrame()
     choices["clean"] = clean_text_series(choices["text"], stopwords)
+    choices = choices[choices["clean"].str.len() > 0].copy()
+    if choices.empty:
+        return pd.DataFrame()
+    n_texts_map = choices.groupby(group_col).size().to_dict()
+    if len(n_texts_map) >= 2:
+        group_corpus = choices.groupby(group_col)["clean"].apply(lambda s: " ".join(s))
+        try:
+            vectorizer = TfidfVectorizer(
+                stop_words=list(stopwords),
+                min_df=1,
+                max_features=2000,
+                ngram_range=(1, 2),
+                sublinear_tf=True,
+            )
+            tfidf_matrix = vectorizer.fit_transform(group_corpus)
+            terms_arr = np.array(vectorizer.get_feature_names_out())
+            rows = []
+            for i, group_value in enumerate(group_corpus.index):
+                scores = tfidf_matrix[i].toarray().flatten()
+                top_idx = np.argsort(scores)[::-1][:top_n]
+                top_terms = [terms_arr[j] for j in top_idx if scores[j] > 0]
+                rows.append({group_col: group_value, "top_keywords": ", ".join(top_terms), "n_texts": n_texts_map.get(group_value, 0)})
+            return pd.DataFrame(rows).sort_values("n_texts", ascending=False)
+        except Exception:
+            pass
     rows = []
     for group_value, subset in choices.groupby(group_col):
         terms = Counter()
@@ -262,6 +325,45 @@ def argumentative_pattern_table(df_last: pd.DataFrame, stopwords: Sequence[str])
     summary = pattern_df.groupby(["profession", "argument_pattern"]).size().reset_index(name="n")
     summary["pct_profession"] = summary.groupby("profession")["n"].transform(lambda s: (s / s.sum() * 100).round(2))
     return summary.sort_values(["profession", "n"], ascending=[True, False])
+
+
+def internal_consistency_estimate(df_last: pd.DataFrame) -> pd.DataFrame:
+    """Proxy de consistencia interna del bloque Likert por estadio usando correlación media
+    interitem y fórmula de Spearman-Brown. Señal descriptiva-formativa, no diagnóstico psicométrico."""
+    stage_rows = df_last[df_last["row_type"] == "stage_likert"].copy()
+    if stage_rows.empty:
+        return pd.DataFrame()
+    stage_rows["sub_id_num"] = pd.to_numeric(stage_rows["sub_id"], errors="coerce")
+    stage_rows = stage_rows.dropna(subset=["sub_id_num"])
+    pivoted = stage_rows.pivot_table(
+        index=["anon_id", "profession"],
+        columns="sub_id_num",
+        values="likert_value",
+        aggfunc="mean",
+    ).dropna()
+    if pivoted.shape[0] < 3 or pivoted.shape[1] < 2:
+        return pd.DataFrame()
+    n_items = int(pivoted.shape[1])
+    rows = []
+    for profession, g in pivoted.groupby(level="profession"):
+        mat = g.droplevel("profession")
+        if len(mat) < 2:
+            continue
+        corr_matrix = mat.corr()
+        off_diag = corr_matrix.values[~np.eye(corr_matrix.shape[0], dtype=bool)]
+        valid = off_diag[~np.isnan(off_diag)]
+        if len(valid) == 0:
+            continue
+        mean_r = float(valid.mean())
+        denom = 1 + (n_items - 1) * mean_r
+        alpha_proxy = (n_items * mean_r / denom) if denom != 0 and not np.isnan(mean_r) else np.nan
+        rows.append({
+            "profesion": profession,
+            "n_participantes": int(len(mat)),
+            "r_media_interitem": round(mean_r, 3),
+            "alpha_proxy": round(float(alpha_proxy), 3) if pd.notna(alpha_proxy) else np.nan,
+        })
+    return pd.DataFrame(rows).sort_values("n_participantes", ascending=False)
 
 
 def profession_interpretive_trends(
@@ -366,6 +468,16 @@ def automatic_interpretive_synthesis(
                 f"La consolidación por cohorte muestra variación entre {cohort_count} grupos analíticos, lo que refuerza la conveniencia de leer los resultados desde una lógica comparativa prudente, sensible al tamaño muestral, a las condiciones locales de formación y a los posibles usos en evaluación curricular."
             )
         )
+    frequency_summary = quantitative_report.get("frequency_summary", pd.DataFrame())
+    if not frequency_summary.empty:
+        level_freq = frequency_summary[frequency_summary["variable"] == "k_level"].copy()
+        if not level_freq.empty:
+            top_level_row = level_freq.sort_values("pct", ascending=False).iloc[0]
+            sentences.append(
+                f"El análisis de frecuencias sobre los niveles morales registrados indica que la categoría '{top_level_row['category']}' concentra el {top_level_row['pct']:.1f}% de las observaciones; "
+                "este dato de frecuencia relativa puede orientar la discusión curricular sobre qué estadios de argumentación conviene reforzar con mayor énfasis en el programa de formación, "
+                "sin convertir el porcentaje en un veredicto sobre la calidad moral de los participantes."
+            )
     sentences.append(
         (
             "En conjunto, esta síntesis debe entenderse como una lectura analítica de apoyo para docencia, reflexión en bioética aplicada, investigación educativa y evaluación curricular de carácter formativo; "

@@ -5,6 +5,7 @@ import hmac
 import os
 import re
 import unicodedata
+from io import BytesIO
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -23,6 +24,7 @@ from analysis_module import (
     clean_text_series,
     cluster_thematic_justifications,
     extract_keywords_by_group,
+    internal_consistency_estimate,
     profession_interpretive_trends,
 )
 from persistence import COLUMNS, load_persistence_store
@@ -34,7 +36,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 # Configuración general
 # =========================
 st.set_page_config(
-    page_title="Moral Test — Kohlberg & Ethical Frameworks",
+    page_title="ETHOSCOPE — Analítica de Razonamiento Moral",
     page_icon="⚖️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -42,12 +44,14 @@ st.set_page_config(
 
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
-APP_TITLE = "Instrumento formativo de razonamiento moral y marcos éticos"
+APP_BRAND_NAME = "ETHOSCOPE"
+APP_BRAND_LINE = "Analítica de razonamiento moral y deliberación ética aplicada"
+APP_TITLE = "ETHOSCOPE"
 APP_SUBTITLE = (
-    "Versión en Streamlit, orientada a estudiantes y profesionales. "
-    "No es diagnóstica; apoya reflexión, docencia y análisis colectivo."
+    "Plataforma académica para explorar dilemas profesionales, marcos éticos y patrones de argumentación "
+    "en estudiantes, docentes e investigadores."
 )
-DEFAULT_ROUTE_SIZE = 6
+DEFAULT_ROUTE_SIZE = 8
 MIN_JUSTIFICATION_CHARS = 25
 ADMIN_SESSION_KEY = "admin_authenticated"
 AUTHOR_NAME = "Profesor Anderson Díaz Pérez"
@@ -99,7 +103,7 @@ PLOTLY_EXPORT_CONFIG = {
     "responsive": True,
     "toImageButtonOptions": {
         "format": "png",
-        "filename": "instrumento_moral",
+        "filename": "ethoscope",
         "height": 720,
         "width": 1280,
         "scale": 2,
@@ -597,8 +601,8 @@ PROFESSION_OPTIONS = [
 
 ROUTE_BANKS = {
     "salud": ["K1", "K2", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8"],
-    "bacteriologia_laboratorio": ["BM2", "BM3", "BM4", "BM5", "BM6", "BM8", "BM9", "BM10", "K1", "K2"],
-    "microbiologia_laboratorio": ["BM1", "BM3", "BM4", "BM5", "BM7", "BM8", "BM11", "BM12", "K1", "K2"],
+    "bacteriologia_laboratorio": ["BM10", "BM2", "BM3", "BM9", "BM5", "BM4", "BM6", "BM8", "K1", "K2"],
+    "microbiologia_laboratorio": ["BM1", "BM7", "BM3", "BM4", "BM5", "BM12", "BM11", "BM8", "K1", "K2"],
     "social_juridica": ["K1", "K2", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"],
     "ingenieria_ti_datos": ["K1", "K2", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"],
     "mixta": ["K1", "K2", "H1", "L1", "T1", "H4", "L4", "T2"],
@@ -739,14 +743,18 @@ def normalize_group_label(value: str | None) -> str:
 
 
 def get_admin_password() -> str | None:
-    env_password = os.getenv("MORAL_TEST_ADMIN_PASSWORD")
-    if env_password:
-        return env_password
+    for env_key in ["MORAL_TEST_ADMIN_PASSWORD", "ADMIN_PASSWORD"]:
+        env_password = os.getenv(env_key)
+        if env_password:
+            return env_password
     try:
-        secret_password = st.secrets.get("MORAL_TEST_ADMIN_PASSWORD")
+        for secret_key in ["MORAL_TEST_ADMIN_PASSWORD", "ADMIN_PASSWORD"]:
+            secret_password = st.secrets.get(secret_key)
+            if secret_password:
+                return str(secret_password)
     except Exception:
-        secret_password = None
-    return str(secret_password) if secret_password else None
+        pass
+    return None
 
 
 def is_admin_authenticated() -> bool:
@@ -757,7 +765,7 @@ def admin_login_panel() -> bool:
     configured_password = get_admin_password()
     if not configured_password:
         st.error(
-            "El acceso administrativo está bloqueado hasta configurar `MORAL_TEST_ADMIN_PASSWORD` en variables de entorno o secrets de Streamlit."
+            "El acceso administrativo está bloqueado hasta configurar `MORAL_TEST_ADMIN_PASSWORD` o `ADMIN_PASSWORD` en variables de entorno o secrets de Streamlit."
         )
         return False
 
@@ -848,7 +856,10 @@ def hedges_g(a: np.ndarray | list, b: np.ndarray | list) -> float:
 
 def route_for_profession(label: str, route_size: int) -> List[dict]:
     route_group = route_group_for_profession(label)
-    ids = ROUTE_BANKS.get(route_group, ["K1", "K2"])[:route_size]
+    effective_size = route_size
+    if route_group in {"bacteriologia_laboratorio", "microbiologia_laboratorio"}:
+        effective_size = max(route_size, 8)
+    ids = ROUTE_BANKS.get(route_group, ["K1", "K2"])[:effective_size]
     return [LOOKUP[item_id] for item_id in ids]
 
 
@@ -1027,26 +1038,67 @@ def render_global_styles() -> None:
         """
         <style>
         .hero-card {
-            background: linear-gradient(135deg, #0b1f3a 0%, #133a63 55%, #1c5f8d 100%);
-            padding: 1.4rem 1.6rem;
-            border-radius: 18px;
+            background:
+                radial-gradient(circle at top right, rgba(192, 138, 43, 0.20), transparent 28%),
+                linear-gradient(135deg, #081729 0%, #0b1f3a 38%, #12446c 100%);
+            padding: 1.55rem 1.7rem;
+            border-radius: 22px;
             color: #f7fbff;
-            box-shadow: 0 10px 28px rgba(10, 25, 47, 0.22);
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            box-shadow: 0 14px 36px rgba(10, 25, 47, 0.24);
             margin-bottom: 1rem;
+            position: relative;
+            overflow: hidden;
+        }
+        .hero-card::after {
+            content: "";
+            position: absolute;
+            right: -30px;
+            top: -30px;
+            width: 180px;
+            height: 180px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.05);
         }
         .hero-card h1 {
-            font-size: 2rem;
-            margin: 0 0 .35rem 0;
+            font-size: 2.3rem;
+            margin: 0 0 .2rem 0;
             line-height: 1.15;
+            letter-spacing: 0.08em;
+            font-family: "Palatino Linotype", "Book Antiqua", Georgia, serif;
         }
         .hero-card p {
             margin: 0.2rem 0;
             font-size: 1rem;
         }
+        .hero-kicker {
+            display: inline-block;
+            margin-bottom: 0.7rem;
+            padding: 0.28rem 0.62rem;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.12);
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            color: #f8df9d;
+            font-size: 0.78rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .hero-lead {
+            max-width: 56rem;
+            color: #dce8f5;
+            font-size: 1.03rem;
+        }
+        .brand-signature {
+            color: #f8df9d;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
         .author-card {
-            background: #f6f9fc;
+            background: linear-gradient(180deg, #f7fafc 0%, #eef4f9 100%);
             border: 1px solid #d9e5f2;
-            border-left: 6px solid #1c5f8d;
+            border-left: 6px solid #c08a2b;
             padding: 1rem;
             border-radius: 14px;
             margin-bottom: 1rem;
@@ -1103,8 +1155,10 @@ def render_header() -> None:
     st.markdown(
         f"""
         <div class="hero-card">
+            <span class="hero-kicker">Software académico de bioética aplicada</span>
             <h1>{APP_TITLE}</h1>
-            <p>{APP_SUBTITLE}</p>
+            <p class="brand-signature">{APP_BRAND_LINE}</p>
+            <p class="hero-lead">{APP_SUBTITLE}</p>
             <p><strong>Autor:</strong> {AUTHOR_NAME}</p>
             <p>{creds}</p>
         </div>
@@ -1121,6 +1175,9 @@ def render_sidebar_branding() -> None:
     st.sidebar.markdown(
         f"""
         <div class="author-card">
+            <strong style="font-size:1.05rem; letter-spacing:.08em;">{APP_BRAND_NAME}</strong><br>
+            <span class="minor-note">{APP_BRAND_LINE}</span>
+            <hr style="margin:.6rem 0;">
             <strong>{AUTHOR_NAME}</strong><br>
             <span class="minor-note">{'<br>'.join(AUTHOR_CREDENTIALS)}</span>
             <hr style="margin:.6rem 0;">
@@ -1137,24 +1194,71 @@ def render_sidebar_branding() -> None:
 
 def make_program_flow_figure() -> go.Figure:
     labels = [
-        "Identificación y ruta profesional",
-        "Dilemas éticos contextualizados",
-        "Justificación argumentativa",
-        "Escalas Likert por estadio",
-        "Inventario de marcos éticos",
-        "Reporte individual",
-        "Dashboard colectivo",
+        "Identificación y\nruta profesional",
+        "Dilemas éticos\ncontextualizados",
+        "Justificación\nargumentativa",
+        "Escalas Likert\npor estadio",
+        "Inventario de\nmarcos éticos",
+        "Reporte\nindividual",
+        "Dashboard\ncolectivo",
     ]
     fig = go.Figure(data=[go.Sankey(
         arrangement="snap",
-        node=dict(label=labels, pad=20, thickness=20),
+        node=dict(
+            label=labels,
+            pad=22,
+            thickness=24,
+            line=dict(color="#d7e2ee", width=1.2),
+            color=[
+                "#16324F",
+                "#1F4E79",
+                "#2A6B8F",
+                "#3C7A89",
+                "#7A6A4F",
+                "#B78A3E",
+                "#51697D",
+            ],
+            hovertemplate="%{label}<extra></extra>",
+        ),
         link=dict(
             source=[0, 1, 2, 3, 4],
             target=[1, 2, 3, 5, 6],
             value=[1, 1, 1, 1, 1],
+            color=[
+                "rgba(31, 78, 121, 0.22)",
+                "rgba(42, 107, 143, 0.20)",
+                "rgba(22, 50, 79, 0.18)",
+                "rgba(183, 138, 62, 0.22)",
+                "rgba(81, 105, 125, 0.24)",
+            ],
+            hovertemplate="%{source.label} → %{target.label}<extra></extra>",
         ),
     )])
-    fig.update_layout(title="Arquitectura funcional del programa", height=420)
+    fig.update_layout(
+        title={
+            "text": "Arquitectura funcional del programa",
+            "x": 0.03,
+            "xanchor": "left",
+            "font": {"size": 22, "family": "Aptos, Segoe UI, Arial, sans-serif", "color": "#16324F"},
+        },
+        height=480,
+        font=dict(size=12, family="Aptos, Segoe UI, Arial, sans-serif", color="#F7FBFF"),
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
+        margin=dict(l=20, r=20, t=80, b=30),
+        annotations=[
+            dict(
+                x=0,
+                y=1.11,
+                xref="paper",
+                yref="paper",
+                text="Ruta sintética del instrumento desde la identificación del participante hasta el análisis individual y colectivo.",
+                showarrow=False,
+                font=dict(size=12, color="#526577", family="Aptos, Segoe UI, Arial, sans-serif"),
+                align="left",
+            )
+        ],
+    )
     return fig
 
 
@@ -1202,7 +1306,11 @@ def page_program() -> None:
             "No debe emplearse como instrumento clínico-diagnóstico ni como criterio único para decisiones académicas o laborales."
         )
     with c2:
-        st.plotly_chart(make_program_flow_figure(), use_container_width=True)
+        render_plotly_figure(
+            make_program_flow_figure(),
+            "arquitectura_funcional_programa",
+            caption="Diagrama de alto nivel del recorrido pedagógico y analítico de ETHOSCOPE, con mejor contraste y legibilidad para docencia, presentación y revisión institucional.",
+        )
 
     st.markdown("### Objetivos del programa")
     cols = st.columns(2)
@@ -1289,6 +1397,19 @@ def framework_label(value: str) -> str:
 def filename_slug(value: str) -> str:
     text = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower())
     return text.strip("_") or "grafica"
+
+
+def dataframe_to_excel_bytes(sheet_map: Dict[str, pd.DataFrame]) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, data in sheet_map.items():
+            safe_name = re.sub(r"[^A-Za-z0-9_]+", "_", str(sheet_name))[:31] or "Hoja"
+            export_df = data.copy()
+            if export_df.empty:
+                export_df = pd.DataFrame({"mensaje": ["Sin datos disponibles"]})
+            export_df.to_excel(writer, sheet_name=safe_name, index=False)
+    output.seek(0)
+    return output.getvalue()
 
 
 def style_academic_figure(fig: go.Figure, title: str, height: int = 480, showlegend: bool = True, **layout_updates) -> go.Figure:
@@ -1446,6 +1567,125 @@ def make_stage_profile_chart(stage_means: Dict[int, float], title: str) -> go.Fi
     fig.update_layout(xaxis_title="Estadio", yaxis_title="Promedio Likert", coloraxis_showscale=False)
     fig.update_yaxes(range=[0, 7.4])
     return style_academic_figure(fig, title, height=420, showlegend=False)
+
+
+def make_frequency_summary_chart(frequency_summary: pd.DataFrame) -> go.Figure:
+    if frequency_summary.empty:
+        return go.Figure()
+    plot_df = frequency_summary[frequency_summary["variable"].isin(["k_level", "fw_dom"])].copy()
+    if plot_df.empty:
+        return go.Figure()
+    variable_map = {"k_level": "Nivel moral dominante", "fw_dom": "Marco ético dominante"}
+    plot_df["variable_label"] = plot_df["variable"].map(variable_map)
+    fig = px.bar(
+        plot_df,
+        x="category",
+        y="pct",
+        color="variable_label",
+        barmode="group",
+        text="n",
+        title="Distribución de frecuencias: nivel moral y marco dominante",
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+        labels={"pct": "Porcentaje (%)", "category": "Categoría observada", "variable_label": "Variable"},
+    )
+    fig.update_traces(textposition="outside")
+    fig.update_layout(xaxis_title="Categoría", yaxis_title="% dentro de la variable")
+    return style_academic_figure(fig, "Distribución de frecuencias: nivel moral y marco dominante", height=450)
+
+
+def make_stage_ci_chart(stage_summary: pd.DataFrame, profession_order: List[str]) -> go.Figure:
+    if stage_summary.empty:
+        return go.Figure()
+    plot_df = stage_summary.copy()
+    plot_df["stage"] = pd.to_numeric(plot_df["stage"], errors="coerce")
+    plot_df = plot_df.dropna(subset=["stage", "stage_mean"])
+    if plot_df.empty:
+        return go.Figure()
+    plot_df["stage_label"] = plot_df["stage"].apply(lambda s: f"E{int(s)}")
+    plot_df["error_up"] = (plot_df["ci_high"] - plot_df["stage_mean"]).clip(lower=0).fillna(0)
+    plot_df["error_down"] = (plot_df["stage_mean"] - plot_df["ci_low"]).clip(lower=0).fillna(0)
+    fig = px.scatter(
+        plot_df,
+        x="stage_label",
+        y="stage_mean",
+        color="profession",
+        error_y="error_up",
+        error_y_minus="error_down",
+        title="Promedios por estadio moral con IC 95% (bootstrap)",
+        category_orders={
+            "profession": profession_order,
+            "stage_label": [f"E{i}" for i in range(1, 7)],
+        },
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+        labels={"stage_mean": "Promedio Likert", "stage_label": "Estadio"},
+    )
+    fig.update_layout(yaxis=dict(range=[0.5, 7.5]))
+    return style_academic_figure(fig, "Promedios por estadio moral con IC 95% (bootstrap)", height=500)
+
+
+def make_framework_ci_chart(framework_ci_summary: pd.DataFrame, profession_order: List[str]) -> go.Figure:
+    if framework_ci_summary.empty:
+        return go.Figure()
+    plot_df = framework_ci_summary.copy()
+    plot_df["framework_label"] = plot_df["framework"].map(framework_label)
+    plot_df["error_up"] = (plot_df["ci_high"] - plot_df["fw_mean"]).clip(lower=0).fillna(0)
+    plot_df["error_down"] = (plot_df["fw_mean"] - plot_df["ci_low"]).clip(lower=0).fillna(0)
+    fig = px.scatter(
+        plot_df,
+        x="framework_label",
+        y="fw_mean",
+        color="profession",
+        error_y="error_up",
+        error_y_minus="error_down",
+        title="Medias de marcos éticos por profesión con IC 95% (bootstrap)",
+        category_orders={"profession": profession_order},
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+        labels={"fw_mean": "Media Likert", "framework_label": "Marco ético"},
+    )
+    fig.update_layout(yaxis=dict(range=[0.5, 7.5]))
+    return style_academic_figure(fig, "Medias de marcos éticos por profesión con IC 95% (bootstrap)", height=500)
+
+
+def make_keyword_bubble_chart(keyword_df: pd.DataFrame, group_col: str = "profession") -> go.Figure:
+    if keyword_df.empty:
+        return go.Figure()
+    rows = []
+    for _, row in keyword_df.head(10).iterrows():
+        terms = [t.strip() for t in str(row["top_keywords"]).split(",") if t.strip()]
+        for rank, term in enumerate(terms[:6], start=1):
+            rows.append({
+                group_col: str(row[group_col]),
+                "termino": term,
+                "rank": rank,
+                "peso": max(1, 7 - rank),
+            })
+    if not rows:
+        return go.Figure()
+    plot_df = pd.DataFrame(rows)
+    fig = px.scatter(
+        plot_df,
+        x="rank",
+        y=group_col,
+        text="termino",
+        size="peso",
+        color=group_col,
+        title="Vocabulario clave por grupo (relevancia TF-IDF posicional)",
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+        labels={"rank": "Rango de relevancia (1 = más distintivo)", group_col: ""},
+    )
+    fig.update_traces(textposition="middle center", mode="markers+text", marker_opacity=0.4)
+    fig.update_layout(
+        showlegend=False,
+        xaxis=dict(tickmode="linear", dtick=1, range=[0.3, 6.7]),
+        yaxis_title="",
+    )
+    n_groups = len(plot_df[group_col].unique())
+    return style_academic_figure(
+        fig,
+        "Vocabulario clave por grupo (relevancia TF-IDF posicional)",
+        height=max(360, n_groups * 52 + 180),
+        showlegend=False,
+    )
 
 
 def build_executive_kpi_table(students: pd.DataFrame, quantitative_report: Dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -1853,6 +2093,9 @@ def page_dashboard(df: pd.DataFrame) -> None:
     profession_comparisons = quantitative_report["profession_comparisons"].copy()
     cohort_summary = quantitative_report["cohort_summary"].copy()
     executive_kpis = build_executive_kpi_table(students_filtered, quantitative_report)
+    framework_ci_summary = quantitative_report.get("framework_ci_summary", pd.DataFrame()).copy()
+    stage_summary_df = quantitative_report.get("stage_summary", pd.DataFrame()).copy()
+    consistency_df = internal_consistency_estimate(df_last_filtered)
     collective_choice_df = df_last_filtered[df_last_filtered["row_type"] == "choice"].copy()
     if not collective_choice_df.empty:
         collective_choice_df["framework_label"] = collective_choice_df["choice_framework"].map(framework_label)
@@ -1920,6 +2163,19 @@ def page_dashboard(df: pd.DataFrame) -> None:
                 "sankey_dilema_marco",
                 data_df=collective_choice_df[["profession", "item_id", "choice_framework", "framework_label", "choice_level"]],
                 caption="Mapa de decisión agregado entre los dilemas respondidos y los marcos éticos finalmente seleccionados.",
+            )
+
+        st.markdown("#### Distribución de frecuencias por categoría analítica")
+        freq_data = quantitative_report.get("frequency_summary", pd.DataFrame())
+        if freq_data.empty:
+            st.info("No hay datos suficientes para construir el gráfico de frecuencias.")
+        else:
+            freq_fig = make_frequency_summary_chart(freq_data)
+            render_plotly_figure(
+                freq_fig,
+                "frecuencias_nivel_marco",
+                data_df=freq_data,
+                caption="Frecuencias relativas de nivel moral y marco ético dominante en el conjunto filtrado. Las barras agrupadas permiten comparar la distribución observada entre categorias.",
             )
 
     with tabs[1]:
@@ -2061,6 +2317,30 @@ def page_dashboard(df: pd.DataFrame) -> None:
             st.dataframe(profession_comparisons, use_container_width=True)
             st.caption("Los tamaños de efecto y los intervalos de confianza se interpretan como apoyo descriptivo-formativo y no como prueba concluyente por sí sola.")
 
+        st.markdown("#### Perfil por estadio moral con intervalos de confianza (IC 95%)")
+        if stage_summary_df.empty:
+            st.info("No hay datos de estadio suficientes para el perfil con IC por profesión.")
+        else:
+            stage_ci_fig = make_stage_ci_chart(stage_summary_df, profession_order)
+            render_plotly_figure(
+                stage_ci_fig,
+                "estadios_ic_profesion",
+                data_df=stage_summary_df,
+                caption="Medias Likert de cada estadio Kohlberg por profesión con IC bootstrap al 95%. Mayor promedio en un estadio no implica mayor mérito moral; es una señal argumentativa descriptiva.",
+            )
+
+        st.markdown("#### Marcos éticos por profesión con intervalos de confianza (IC 95%)")
+        if framework_ci_summary.empty:
+            st.info("No hay datos suficientes para estimar IC de marcos por profesión.")
+        else:
+            fw_ci_fig = make_framework_ci_chart(framework_ci_summary, profession_order)
+            render_plotly_figure(
+                fw_ci_fig,
+                "marcos_ic_profesion",
+                data_df=framework_ci_summary,
+                caption="Medias de afinidad con cada marco ético por profesión con IC 95% bootstrap. Las barras de error expresan incertidumbre en la estimación, no variabilidad individual.",
+            )
+
     with tabs[3]:
         st.markdown(
             """
@@ -2106,11 +2386,19 @@ def page_dashboard(df: pd.DataFrame) -> None:
                     caption="Presencia relativa de cada cluster cualitativo dentro de cada profesión.",
                 )
 
-        st.markdown("#### Palabras clave por profesión")
+        st.markdown("#### Vocabulario clave por grupo (TF-IDF)")
         if keyword_df.empty:
             st.info("No fue posible extraer palabras clave por profesión con la información disponible.")
         else:
-            st.dataframe(keyword_df, use_container_width=True)
+            kw_fig = make_keyword_bubble_chart(keyword_df)
+            render_plotly_figure(
+                kw_fig,
+                "vocabulario_clave_grupos",
+                data_df=keyword_df,
+                caption="Términos más distintivos por grupo según relevancia TF-IDF relativa. El rango 1 indica el término más diferenciador respecto a los demás grupos.",
+            )
+            with st.expander("Ver tabla de palabras clave por grupo"):
+                st.dataframe(keyword_df, use_container_width=True)
 
         st.markdown("#### Patrones argumentativos y tendencias interpretativas")
         q_table1, q_table2 = st.columns([1, 1])
@@ -2190,6 +2478,24 @@ def page_dashboard(df: pd.DataFrame) -> None:
         with interp_table2:
             st.dataframe(quantitative_report["descriptive_summary"], use_container_width=True)
 
+        st.markdown("#### Niveles dominantes por participante")
+        dominant_levels_df = quantitative_report.get("dominant_levels", pd.DataFrame())
+        if dominant_levels_df.empty:
+            st.info("No hay datos de niveles dominantes disponibles.")
+        else:
+            st.dataframe(dominant_levels_df, use_container_width=True)
+            st.caption("Nivel moral global dominante, estadio redondeado, marco ético dominante y modo de elección observados para cada participante en su último intento registrado.")
+
+        st.markdown("#### Señal de consistencia interna del bloque Likert por estadio")
+        if consistency_df.empty:
+            st.info("Se requieren al menos 3 participantes por profesión para estimar la consistencia interna del bloque de estadios.")
+        else:
+            st.dataframe(consistency_df, use_container_width=True)
+            st.caption(
+                "Correlación media interitem y proxy de Spearman-Brown (alpha_proxy) dentro del bloque Likert de estadios morales. "
+                "Se interpreta como señal descriptiva de cohesión interna del instrumento en esta muestra, no como diagnóstico psicométrico definitivo."
+            )
+
         st.markdown("#### Exportaciones y trazabilidad")
         export_col1, export_col2 = st.columns([1, 1])
         students_export = students_filtered.drop(columns=["group_filter"], errors="ignore")
@@ -2267,7 +2573,7 @@ def page_admin(df: pd.DataFrame) -> None:
     c3.metric("Detalle", PERSISTENCE_STORE.backend_detail)
     st.caption("Si existe `SUPABASE_DB_URL`, la app usa Supabase/Postgres. Si no existe, usa SQLite local y puede migrar automáticamente un CSV legado en el primer arranque.")
     st.caption(f"Carpeta administrativa de reportes: {ADMIN_REPORT_STORE.base_dir}")
-    st.caption("Las secciones Dashboard colectivo y Administración están protegidas por `MORAL_TEST_ADMIN_PASSWORD`.")
+    st.caption("Las secciones Dashboard colectivo y Administración están protegidas por `MORAL_TEST_ADMIN_PASSWORD` o `ADMIN_PASSWORD`.")
     if ADMIN_REPORT_STORE.drive_url:
         st.caption(f"Referencia de carpeta administrativa en Drive: {ADMIN_REPORT_STORE.drive_url}")
     else:
@@ -2275,6 +2581,162 @@ def page_admin(df: pd.DataFrame) -> None:
     if st.button("Recargar datos", use_container_width=True):
         load_df_cached.clear()
         st.rerun()
+
+    st.markdown("### Consultas persistentes y exportación")
+    st.write("Consulta el backend consolidado sin depender del CSV legado y descarga tablas administrativas listas para revisión académica.")
+    attempt_summaries = PERSISTENCE_STORE.run_query("attempt_summaries", limit=5000)
+    if attempt_summaries.empty:
+        st.info("Aún no hay intentos almacenados en el backend activo para consultas administrativas.")
+    else:
+        attempt_summaries = attempt_summaries.copy()
+        attempt_summaries["timestamp_dt"] = pd.to_datetime(attempt_summaries["timestamp"], errors="coerce")
+        attempt_lookup = attempt_summaries.drop_duplicates(subset=["anon_id"]).copy()
+        attempt_lookup["display_label"] = attempt_lookup.apply(
+            lambda row: f"{row['name'] or row['student_id'] or str(row['anon_id'])[:8]} | {row['profession'] or 'Sin profesión'} | {row['group'] or 'Sin grupo'}",
+            axis=1,
+        )
+        profession_options = sorted(attempt_summaries["profession"].dropna().astype(str).unique().tolist())
+        group_options = sorted(attempt_summaries["group"].dropna().astype(str).unique().tolist())
+
+        st.markdown("#### Vista de auditoría")
+        date_col1, date_col2, date_col3 = st.columns([1, 1, 1])
+        valid_dates = attempt_summaries["timestamp_dt"].dropna()
+        min_date = valid_dates.min().date() if not valid_dates.empty else datetime.now().date()
+        max_date = valid_dates.max().date() if not valid_dates.empty else datetime.now().date()
+        selected_date_range = date_col1.date_input(
+            "Rango de fechas",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+        )
+        audit_profession = date_col2.selectbox("Profesión auditoría", options=["Todas"] + profession_options)
+        audit_group = date_col3.selectbox("Cohorte auditoría", options=["Todas"] + group_options)
+
+        audit_df = attempt_summaries.copy()
+        if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
+            start_date, end_date = selected_date_range
+            audit_df = audit_df[
+                audit_df["timestamp_dt"].dt.date.between(start_date, end_date, inclusive="both")
+            ].copy()
+        if audit_profession != "Todas":
+            audit_df = audit_df[audit_df["profession"] == audit_profession].copy()
+        if audit_group != "Todas":
+            audit_df = audit_df[audit_df["group"] == audit_group].copy()
+
+        audit_metrics = st.columns(4)
+        audit_metrics[0].metric("Intentos filtrados", str(len(audit_df)))
+        audit_metrics[1].metric("Participantes únicos", str(audit_df["anon_id"].nunique()))
+        audit_metrics[2].metric("Profesiones visibles", str(audit_df["profession"].dropna().nunique()))
+        audit_metrics[3].metric("Cohortes visibles", str(audit_df["group"].dropna().nunique()))
+
+        if audit_df.empty:
+            st.info("Los filtros de auditoría no devuelven intentos en el rango seleccionado.")
+        else:
+            st.dataframe(
+                audit_df.drop(columns=["timestamp_dt"], errors="ignore"),
+                use_container_width=True,
+            )
+            audit_professions = audit_df["profession"].dropna().astype(str).unique().tolist()
+            audit_comparison_df = PERSISTENCE_STORE.run_query(
+                "profession_comparison",
+                professions=audit_professions or None,
+            )
+            raw_rows_filtered = df.copy()
+            raw_rows_filtered["timestamp_dt"] = pd.to_datetime(raw_rows_filtered["timestamp"], errors="coerce")
+            if isinstance(selected_date_range, (tuple, list)) and len(selected_date_range) == 2:
+                start_date, end_date = selected_date_range
+                raw_rows_filtered = raw_rows_filtered[
+                    raw_rows_filtered["timestamp_dt"].dt.date.between(start_date, end_date, inclusive="both")
+                ].copy()
+            if audit_profession != "Todas":
+                raw_rows_filtered = raw_rows_filtered[raw_rows_filtered["profession"] == audit_profession].copy()
+            if audit_group != "Todas":
+                raw_rows_filtered = raw_rows_filtered[raw_rows_filtered["group"] == audit_group].copy()
+            raw_rows_filtered = raw_rows_filtered.drop(columns=["timestamp_dt"], errors="ignore")
+
+            export_col1, export_col2 = st.columns([1, 1])
+            export_col1.download_button(
+                "Descargar auditoría filtrada (CSV)",
+                data=audit_df.drop(columns=["timestamp_dt"], errors="ignore").to_csv(index=False).encode("utf-8"),
+                file_name="auditoria_filtrada.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            export_col2.download_button(
+                "Descargar paquete administrativo (Excel)",
+                data=dataframe_to_excel_bytes({
+                    "auditoria_intentos": audit_df.drop(columns=["timestamp_dt"], errors="ignore"),
+                    "comparacion_profesion": audit_comparison_df,
+                    "filas_respuestas": raw_rows_filtered,
+                    "catalogo_lab": pd.DataFrame([
+                        {
+                            "id": item["id"],
+                            "ruta_sugerida": item["ruta_sugerida"],
+                            "foco": item["foco"],
+                            "titulo": LOOKUP[item["id"]]["title"],
+                            "planteamiento": LOOKUP[item["id"]]["prompt"],
+                            "justificacion_pedagogica": LOOKUP[item["id"]].get("pedagogical_justification", ""),
+                        }
+                        for item in LAB_DILEMMA_CATALOG
+                    ]),
+                }),
+                file_name="paquete_administrativo.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+        query_labels = {
+            "attempt_summaries": "Resumen de intentos",
+            "last_attempt": "Último intento por usuario",
+            "user_history": "Histórico completo por usuario",
+            "cohort_history": "Histórico por cohorte",
+            "profession_comparison": "Comparación agregada por profesión",
+        }
+        selected_query = st.selectbox("Tipo de consulta", options=list(query_labels.keys()), format_func=lambda key: query_labels[key])
+
+        query_df = pd.DataFrame()
+        export_name = selected_query
+        if selected_query == "attempt_summaries":
+            selected_profession = st.selectbox("Filtrar profesión", options=["Todas"] + profession_options)
+            selected_group = st.selectbox("Filtrar cohorte", options=["Todas"] + group_options)
+            limit = st.slider("Máximo de intentos a mostrar", min_value=20, max_value=500, value=200, step=20)
+            query_df = PERSISTENCE_STORE.run_query(
+                "attempt_summaries",
+                profession=None if selected_profession == "Todas" else selected_profession,
+                group_name=None if selected_group == "Todas" else selected_group,
+                limit=limit,
+            )
+            export_name = "resumen_intentos"
+        elif selected_query == "last_attempt":
+            selected_label = st.selectbox("Usuario", options=attempt_lookup["display_label"].tolist())
+            selected_anon = attempt_lookup.loc[attempt_lookup["display_label"] == selected_label, "anon_id"].iloc[0]
+            query_df = PERSISTENCE_STORE.run_query("last_attempt", anon_id=selected_anon)
+            export_name = f"ultimo_intento_{selected_anon}"
+        elif selected_query == "user_history":
+            selected_label = st.selectbox("Usuario", options=attempt_lookup["display_label"].tolist(), key="admin_user_history")
+            selected_anon = attempt_lookup.loc[attempt_lookup["display_label"] == selected_label, "anon_id"].iloc[0]
+            query_df = PERSISTENCE_STORE.run_query("user_history", anon_id=selected_anon)
+            export_name = f"historico_usuario_{selected_anon}"
+        elif selected_query == "cohort_history":
+            selected_group = st.selectbox("Cohorte / grupo", options=group_options)
+            query_df = PERSISTENCE_STORE.run_query("cohort_history", group_name=selected_group)
+            export_name = f"historico_cohorte_{filename_slug(selected_group)}"
+        elif selected_query == "profession_comparison":
+            selected_professions = st.multiselect("Profesiones", options=profession_options, default=profession_options)
+            query_df = PERSISTENCE_STORE.run_query("profession_comparison", professions=selected_professions or None)
+            export_name = "comparacion_profesiones"
+
+        if query_df.empty:
+            st.info("La consulta seleccionada no devolvió resultados con los filtros actuales.")
+        else:
+            st.dataframe(query_df, use_container_width=True)
+            st.download_button(
+                "Descargar resultado de la consulta (CSV)",
+                data=query_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"{filename_slug(export_name)}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
     st.markdown("### Catálogo de dilemas de laboratorio")
     st.write("Revisión docente de los casos específicos para Bacteriología y Microbiología.")

@@ -23,6 +23,11 @@ COLUMNS = [
 
 ATTEMPTS_TABLE = "participant_attempts"
 RESPONSES_TABLE = "attempt_responses"
+ATTEMPT_METADATA_COLUMNS = {
+    "n_dilemmas_answered": "INTEGER",
+    "n_justifications": "INTEGER",
+    "responded_item_ids": "TEXT",
+}
 
 
 def _is_missing(value: Any) -> bool:
@@ -110,8 +115,52 @@ class PersistenceStore:
                 JOIN {RESPONSES_TABLE} r ON r.attempt_id = a.attempt_id
                 ORDER BY a.timestamp, r.response_order
             """
-            rows = pd.read_sql_query(query, conn)
+            rows = self._read_sql(conn, query)
         return self._normalize_dataframe(rows)
+
+    def get_attempt_summaries(
+        self,
+        profession: str | None = None,
+        group_name: str | None = None,
+        anon_id: str | None = None,
+        limit: int | None = None,
+    ) -> pd.DataFrame:
+        self.ensure_storage()
+        with self._connect() as conn:
+            placeholder = self._placeholder
+            query = f"""
+                SELECT
+                    attempt_id,
+                    timestamp,
+                    anon_id,
+                    student_id,
+                    name,
+                    profession,
+                    years_experience,
+                    group_name AS "group",
+                    n_dilemmas_answered,
+                    n_justifications,
+                    responded_item_ids,
+                    created_at
+                FROM {ATTEMPTS_TABLE}
+            """
+            filters: list[str] = []
+            params: list[Any] = []
+            if profession:
+                filters.append(f"profession = {placeholder}")
+                params.append(profession)
+            if group_name:
+                filters.append(f"group_name = {placeholder}")
+                params.append(group_name)
+            if anon_id:
+                filters.append(f"anon_id = {placeholder}")
+                params.append(anon_id)
+            if filters:
+                query += " WHERE " + " AND ".join(filters)
+            query += " ORDER BY timestamp DESC"
+            if limit is not None and limit > 0:
+                query += f" LIMIT {int(limit)}"
+            return self._read_sql(conn, query, params)
 
     def get_last_attempt_rows(self, anon_id: str) -> pd.DataFrame:
         self.ensure_storage()
@@ -214,7 +263,10 @@ class PersistenceStore:
                 SELECT
                     profession,
                     COUNT(*) AS attempts,
+                    COUNT(DISTINCT anon_id) AS participants,
                     AVG(years_experience) AS avg_years_experience,
+                    AVG(n_dilemmas_answered) AS avg_dilemmas_answered,
+                    AVG(n_justifications) AS avg_justifications,
                     MIN(timestamp) AS first_attempt_at,
                     MAX(timestamp) AS last_attempt_at
                 FROM {ATTEMPTS_TABLE}
@@ -227,6 +279,34 @@ class PersistenceStore:
             query += " GROUP BY profession ORDER BY attempts DESC, profession ASC"
             rows = self._read_sql(conn, query, params)
         return rows
+
+    def run_query(self, query_name: str, **filters: Any) -> pd.DataFrame:
+        if query_name == "last_attempt":
+            anon_id = filters.get("anon_id")
+            if not anon_id:
+                raise ValueError("anon_id es obligatorio para consultar el último intento.")
+            return self.get_last_attempt_rows(str(anon_id))
+        if query_name == "user_history":
+            anon_id = filters.get("anon_id")
+            if not anon_id:
+                raise ValueError("anon_id es obligatorio para consultar el histórico por usuario.")
+            return self.get_user_history(str(anon_id))
+        if query_name == "cohort_history":
+            group_name = filters.get("group_name")
+            if not group_name:
+                raise ValueError("group_name es obligatorio para consultar el histórico por cohorte.")
+            return self.get_cohort_history(str(group_name))
+        if query_name == "profession_comparison":
+            professions = filters.get("professions")
+            return self.get_profession_comparison(professions)
+        if query_name == "attempt_summaries":
+            return self.get_attempt_summaries(
+                profession=filters.get("profession"),
+                group_name=filters.get("group_name"),
+                anon_id=filters.get("anon_id"),
+                limit=filters.get("limit"),
+            )
+        raise ValueError(f"Consulta no soportada: {query_name}")
 
     def _migrate_legacy_csv_if_needed(self) -> None:
         legacy_path = self.config.legacy_csv_path
@@ -252,6 +332,9 @@ class PersistenceStore:
 
     def _extract_attempt_meta(self, rows: pd.DataFrame) -> Dict[str, Any]:
         first = rows.iloc[0]
+        choice_rows = rows[rows["row_type"] == "choice"].copy()
+        responded_item_ids = sorted(choice_rows["item_id"].dropna().astype(str).unique().tolist())
+        n_justifications = int(choice_rows["text"].fillna("").astype(str).str.strip().ne("").sum())
         return {
             "attempt_id": f"{first['anon_id']}_{first['timestamp']}_{uuid4().hex[:8]}",
             "timestamp": str(first["timestamp"]),
@@ -261,6 +344,9 @@ class PersistenceStore:
             "profession": _to_optional_str(first["profession"]),
             "years_experience": _to_optional_int(first["years_experience"]),
             "group_name": _to_optional_str(first["group"]),
+            "n_dilemmas_answered": int(len(responded_item_ids)),
+            "n_justifications": n_justifications,
+            "responded_item_ids": ", ".join(responded_item_ids),
             "raw_payload": rows.to_json(orient="records", force_ascii=False),
         }
 
@@ -309,6 +395,9 @@ class PersistenceStore:
                 profession TEXT,
                 years_experience INTEGER,
                 group_name TEXT,
+                n_dilemmas_answered INTEGER,
+                n_justifications INTEGER,
+                responded_item_ids TEXT,
                 raw_payload TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
@@ -336,6 +425,7 @@ class PersistenceStore:
             f"CREATE INDEX IF NOT EXISTS idx_attempts_profession ON {ATTEMPTS_TABLE}(profession)",
             f"CREATE INDEX IF NOT EXISTS idx_responses_attempt_id ON {RESPONSES_TABLE}(attempt_id)",
             f"CREATE INDEX IF NOT EXISTS idx_responses_item_id ON {RESPONSES_TABLE}(item_id)",
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_responses_attempt_order ON {RESPONSES_TABLE}(attempt_id, response_order)",
         ]
         statements = [attempts_sql, responses_sql, *indexes]
         cursor = conn.cursor()
@@ -344,13 +434,35 @@ class PersistenceStore:
             cursor.execute("PRAGMA journal_mode = WAL")
         for statement in statements:
             cursor.execute(statement)
+        self._ensure_attempt_metadata_columns(conn)
         conn.commit()
+
+    def _ensure_attempt_metadata_columns(self, conn) -> None:
+        existing_columns = self._existing_columns(conn, ATTEMPTS_TABLE)
+        cursor = conn.cursor()
+        for column_name, column_type in ATTEMPT_METADATA_COLUMNS.items():
+            if column_name in existing_columns:
+                continue
+            cursor.execute(f"ALTER TABLE {ATTEMPTS_TABLE} ADD COLUMN {column_name} {column_type}")
+
+    def _existing_columns(self, conn, table_name: str) -> set[str]:
+        if self.config.backend == "supabase":
+            query = """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s
+            """
+            rows = self._read_sql(conn, query, [table_name])
+            return set(rows["column_name"].astype(str).tolist()) if not rows.empty else set()
+        rows = self._read_sql(conn, f"PRAGMA table_info({table_name})")
+        return set(rows["name"].astype(str).tolist()) if not rows.empty else set()
 
     def _upsert_attempt(self, conn, meta: Dict[str, Any]) -> None:
         placeholder = self._placeholder
         columns = [
             "attempt_id", "timestamp", "anon_id", "student_id", "name",
-            "profession", "years_experience", "group_name", "raw_payload",
+            "profession", "years_experience", "group_name", "n_dilemmas_answered",
+            "n_justifications", "responded_item_ids", "raw_payload",
         ]
         values = [meta[column] for column in columns]
         if self.config.backend == "supabase":
@@ -418,7 +530,12 @@ def load_persistence_store(
 ) -> PersistenceStore:
     sqlite_path = Path(sqlite_path)
     csv_path = Path(legacy_csv_path) if legacy_csv_path else None
-    supabase_db_url = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
+    supabase_db_url = (
+        os.getenv("SUPABASE_DB_URL")
+        or os.getenv("SUPABASE_DATABASE_URL")
+        or os.getenv("POSTGRES_URL")
+        or os.getenv("DATABASE_URL")
+    )
     backend = "supabase" if supabase_db_url else "sqlite"
     store = PersistenceStore(
         PersistenceConfig(

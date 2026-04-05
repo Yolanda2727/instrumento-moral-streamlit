@@ -1,6 +1,6 @@
-# Instrumento formativo de razonamiento moral y marcos éticos
+# ETHOSCOPE
 
-Aplicación en Streamlit para estudiantes y profesionales orientada al análisis formativo del razonamiento moral, la deliberación ética y la calidad básica de la argumentación frente a dilemas contextualizados.
+ETHOSCOPE es una plataforma académica en Streamlit orientada al análisis formativo del razonamiento moral, la deliberación ética y la calidad básica de la argumentación frente a dilemas contextualizados.
 
 ## Autor
 

@@ -17,6 +17,9 @@ except Exception:  # pragma: no cover
 
 COLUMNS = [
     "timestamp", "anon_id", "student_id", "name", "profession", "years_experience", "group",
+    "gender", "age", "semester", "works_for_studies", "children_count",
+    "academic_program", "academic_shift", "prior_experience_area", "ethics_training",
+    "work_hours_per_week", "caregiving_load", "study_funding_type",
     "row_type", "item_id", "sub_id", "choice_key", "choice_stage", "choice_level", "choice_framework",
     "likert_value", "text",
 ]
@@ -27,6 +30,21 @@ ATTEMPT_METADATA_COLUMNS = {
     "n_dilemmas_answered": "INTEGER",
     "n_justifications": "INTEGER",
     "responded_item_ids": "TEXT",
+}
+
+ATTEMPT_PROFILE_COLUMNS = {
+    "gender": "TEXT",
+    "age": "INTEGER",
+    "semester": "INTEGER",
+    "works_for_studies": "TEXT",
+    "children_count": "INTEGER",
+    "academic_program": "TEXT",
+    "academic_shift": "TEXT",
+    "prior_experience_area": "TEXT",
+    "ethics_training": "TEXT",
+    "work_hours_per_week": "INTEGER",
+    "caregiving_load": "TEXT",
+    "study_funding_type": "TEXT",
 }
 
 
@@ -102,6 +120,18 @@ class PersistenceStore:
                     a.profession,
                     a.years_experience,
                     a.group_name AS "group",
+                    a.gender,
+                    a.age,
+                    a.semester,
+                    a.works_for_studies,
+                    a.children_count,
+                    a.academic_program,
+                    a.academic_shift,
+                    a.prior_experience_area,
+                    a.ethics_training,
+                    a.work_hours_per_week,
+                    a.caregiving_load,
+                    a.study_funding_type,
                     r.row_type,
                     r.item_id,
                     r.sub_id,
@@ -138,6 +168,18 @@ class PersistenceStore:
                     profession,
                     years_experience,
                     group_name AS "group",
+                    gender,
+                    age,
+                    semester,
+                    works_for_studies,
+                    children_count,
+                    academic_program,
+                    academic_shift,
+                    prior_experience_area,
+                    ethics_training,
+                    work_hours_per_week,
+                    caregiving_load,
+                    study_funding_type,
                     n_dilemmas_answered,
                     n_justifications,
                     responded_item_ids,
@@ -175,6 +217,18 @@ class PersistenceStore:
                     a.profession,
                     a.years_experience,
                     a.group_name AS "group",
+                    a.gender,
+                    a.age,
+                    a.semester,
+                    a.works_for_studies,
+                    a.children_count,
+                    a.academic_program,
+                    a.academic_shift,
+                    a.prior_experience_area,
+                    a.ethics_training,
+                    a.work_hours_per_week,
+                    a.caregiving_load,
+                    a.study_funding_type,
                     r.row_type,
                     r.item_id,
                     r.sub_id,
@@ -209,6 +263,18 @@ class PersistenceStore:
                     a.profession,
                     a.years_experience,
                     a.group_name AS "group",
+                    a.gender,
+                    a.age,
+                    a.semester,
+                    a.works_for_studies,
+                    a.children_count,
+                    a.academic_program,
+                    a.academic_shift,
+                    a.prior_experience_area,
+                    a.ethics_training,
+                    a.work_hours_per_week,
+                    a.caregiving_load,
+                    a.study_funding_type,
                     r.row_type,
                     r.item_id,
                     r.sub_id,
@@ -239,6 +305,18 @@ class PersistenceStore:
                     a.profession,
                     a.years_experience,
                     a.group_name AS "group",
+                    a.gender,
+                    a.age,
+                    a.semester,
+                    a.works_for_studies,
+                    a.children_count,
+                    a.academic_program,
+                    a.academic_shift,
+                    a.prior_experience_area,
+                    a.ethics_training,
+                    a.work_hours_per_week,
+                    a.caregiving_load,
+                    a.study_funding_type,
                     r.row_type,
                     r.item_id,
                     r.sub_id,
@@ -264,7 +342,11 @@ class PersistenceStore:
                     profession,
                     COUNT(*) AS attempts,
                     COUNT(DISTINCT anon_id) AS participants,
+                    AVG(age) AS avg_age,
+                    AVG(semester) AS avg_semester,
                     AVG(years_experience) AS avg_years_experience,
+                    AVG(work_hours_per_week) AS avg_work_hours_per_week,
+                    AVG(children_count) AS avg_children_count,
                     AVG(n_dilemmas_answered) AS avg_dilemmas_answered,
                     AVG(n_justifications) AS avg_justifications,
                     MIN(timestamp) AS first_attempt_at,
@@ -344,6 +426,18 @@ class PersistenceStore:
             "profession": _to_optional_str(first["profession"]),
             "years_experience": _to_optional_int(first["years_experience"]),
             "group_name": _to_optional_str(first["group"]),
+            "gender": _to_optional_str(first.get("gender")),
+            "age": _to_optional_int(first.get("age")),
+            "semester": _to_optional_int(first.get("semester")),
+            "works_for_studies": _to_optional_str(first.get("works_for_studies")),
+            "children_count": _to_optional_int(first.get("children_count")),
+            "academic_program": _to_optional_str(first.get("academic_program")),
+            "academic_shift": _to_optional_str(first.get("academic_shift")),
+            "prior_experience_area": _to_optional_str(first.get("prior_experience_area")),
+            "ethics_training": _to_optional_str(first.get("ethics_training")),
+            "work_hours_per_week": _to_optional_int(first.get("work_hours_per_week")),
+            "caregiving_load": _to_optional_str(first.get("caregiving_load")),
+            "study_funding_type": _to_optional_str(first.get("study_funding_type")),
             "n_dilemmas_answered": int(len(responded_item_ids)),
             "n_justifications": n_justifications,
             "responded_item_ids": ", ".join(responded_item_ids),
@@ -395,6 +489,18 @@ class PersistenceStore:
                 profession TEXT,
                 years_experience INTEGER,
                 group_name TEXT,
+                gender TEXT,
+                age INTEGER,
+                semester INTEGER,
+                works_for_studies TEXT,
+                children_count INTEGER,
+                academic_program TEXT,
+                academic_shift TEXT,
+                prior_experience_area TEXT,
+                ethics_training TEXT,
+                work_hours_per_week INTEGER,
+                caregiving_load TEXT,
+                study_funding_type TEXT,
                 n_dilemmas_answered INTEGER,
                 n_justifications INTEGER,
                 responded_item_ids TEXT,
@@ -434,8 +540,17 @@ class PersistenceStore:
             cursor.execute("PRAGMA journal_mode = WAL")
         for statement in statements:
             cursor.execute(statement)
+        self._ensure_attempt_profile_columns(conn)
         self._ensure_attempt_metadata_columns(conn)
         conn.commit()
+
+    def _ensure_attempt_profile_columns(self, conn) -> None:
+        existing_columns = self._existing_columns(conn, ATTEMPTS_TABLE)
+        cursor = conn.cursor()
+        for column_name, column_type in ATTEMPT_PROFILE_COLUMNS.items():
+            if column_name in existing_columns:
+                continue
+            cursor.execute(f"ALTER TABLE {ATTEMPTS_TABLE} ADD COLUMN {column_name} {column_type}")
 
     def _ensure_attempt_metadata_columns(self, conn) -> None:
         existing_columns = self._existing_columns(conn, ATTEMPTS_TABLE)
@@ -461,7 +576,11 @@ class PersistenceStore:
         placeholder = self._placeholder
         columns = [
             "attempt_id", "timestamp", "anon_id", "student_id", "name",
-            "profession", "years_experience", "group_name", "n_dilemmas_answered",
+            "profession", "years_experience", "group_name",
+            "gender", "age", "semester", "works_for_studies", "children_count",
+            "academic_program", "academic_shift", "prior_experience_area", "ethics_training",
+            "work_hours_per_week", "caregiving_load", "study_funding_type",
+            "n_dilemmas_answered",
             "n_justifications", "responded_item_ids", "raw_payload",
         ]
         values = [meta[column] for column in columns]

@@ -8,7 +8,7 @@ import unicodedata
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -58,6 +58,10 @@ DEFAULT_ROUTE_SIZE = 8
 MIN_JUSTIFICATION_CHARS = 25
 ADMIN_SESSION_KEY = "admin_authenticated"
 INDIVIDUAL_REPORT_SESSION_KEY = "latest_individual_report"
+MIN_AGE = 16
+MAX_AGE = 85
+MAX_CHILDREN = 20
+MAX_WORK_HOURS = 80
 AUTHOR_NAME = "Profesor Anderson Díaz Pérez"
 AUTHOR_CREDENTIALS = [
     "Doctor en Bioética",
@@ -685,6 +689,82 @@ validate_profession_routes()
 
 PROFESSION_DISPLAY_ORDER = PROFESSION_OPTIONS + list(LEGACY_PROFESSION_LABELS.keys())
 
+PARTICIPANT_CONTEXT_COLUMNS = [
+    "gender",
+    "age",
+    "semester",
+    "works_for_studies",
+    "children_count",
+    "academic_program",
+    "academic_shift",
+    "prior_experience_area",
+    "ethics_training",
+    "work_hours_per_week",
+    "caregiving_load",
+    "study_funding_type",
+]
+
+CONTEXT_FIELD_LABELS = {
+    "gender": "Género",
+    "age": "Edad",
+    "semester": "Semestre",
+    "works_for_studies": "Trabaja para pagar estudios",
+    "children_count": "Número de hijos",
+    "academic_program": "Programa académico",
+    "academic_shift": "Jornada académica",
+    "prior_experience_area": "Experiencia laboral o clínica previa",
+    "ethics_training": "Formación previa en ética o bioética",
+    "work_hours_per_week": "Horas de trabajo por semana",
+    "caregiving_load": "Carga de cuidado familiar",
+    "study_funding_type": "Tipo de financiación de estudios",
+    "years_experience": "Años de experiencia",
+}
+
+CONTEXT_CATEGORICAL_COLUMNS = [
+    "gender",
+    "works_for_studies",
+    "academic_shift",
+    "prior_experience_area",
+    "ethics_training",
+    "caregiving_load",
+    "study_funding_type",
+]
+
+CONTEXT_NUMERIC_COLUMNS = [
+    "age",
+    "semester",
+    "years_experience",
+    "children_count",
+    "work_hours_per_week",
+]
+
+GENDER_OPTIONS = ["Mujer", "Hombre", "No binario", "Otro", "Prefiere no responder"]
+WORK_STUDY_OPTIONS = ["Sí", "No", "Parcialmente"]
+ACADEMIC_SHIFT_OPTIONS = ["", "Diurna", "Nocturna", "Mixta", "Fin de semana", "Otra"]
+PRIOR_EXPERIENCE_OPTIONS = ["", "Ninguna", "Laboral", "Clínica", "Laboral y clínica", "Otra"]
+ETHICS_TRAINING_OPTIONS = ["", "Ninguna", "Curso corto", "Asignatura formal", "Diplomado o posgrado", "Otra"]
+CAREGIVING_LOAD_OPTIONS = ["", "Ninguna", "Baja", "Moderada", "Alta", "Muy alta"]
+STUDY_FUNDING_OPTIONS = ["", "Recursos propios", "Apoyo familiar", "Beca", "Crédito", "Mixta", "Institucional", "Otra"]
+
+SEMESTER_LIMITS_BY_PROFESSION = {
+    "Medicina": 14,
+    "Enfermería": 10,
+    "Fisioterapia": 10,
+    "Instrumentación Quirúrgica": 10,
+    "Bacteriología": 10,
+    "Microbiología": 10,
+    "Derecho": 10,
+    "Ciencias Sociales": 10,
+    "Educación": 10,
+    "Ingeniería": 10,
+    "TI": 10,
+    "Datos": 10,
+    "Otra / Mixta": 12,
+    "Salud (legado)": 10,
+    "Derecho / Ciencias Sociales / Educación (legado)": 10,
+    "Ingeniería / TI / Datos (legado)": 10,
+}
+
 
 # =========================
 # Utilidades de datos
@@ -782,6 +862,45 @@ def normalize_group_label(value: str | None) -> str:
         return "Sin grupo"
     stripped = str(value).strip()
     return stripped if stripped else "Sin grupo"
+
+
+def semester_limit_for_profession(profession: str | None) -> int:
+    normalized = normalize_profession_label(profession)
+    return SEMESTER_LIMITS_BY_PROFESSION.get(normalized or "", 12)
+
+
+def optional_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def optional_int_from_text(value: str | None, *, minimum: int = 0, maximum: int | None = None, field_label: str = "valor") -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if not re.fullmatch(r"\d+", text):
+        raise ValueError(f"{field_label} debe ser un número entero.")
+    parsed = int(text)
+    if parsed < minimum:
+        raise ValueError(f"{field_label} debe ser mayor o igual a {minimum}.")
+    if maximum is not None and parsed > maximum:
+        raise ValueError(f"{field_label} debe ser menor o igual a {maximum}.")
+    return parsed
+
+
+def participant_context_from_row(row: pd.Series | Dict[str, Any]) -> Dict[str, Any]:
+    source = row if isinstance(row, dict) else row.to_dict()
+    return {column: source.get(column) for column in PARTICIPANT_CONTEXT_COLUMNS}
+
+
+def build_context_display_rows(context: Dict[str, Any]) -> List[tuple[str, Any]]:
+    rows = []
+    for column in PARTICIPANT_CONTEXT_COLUMNS:
+        value = context.get(column)
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            continue
+        rows.append((CONTEXT_FIELD_LABELS.get(column, column), value))
+    return rows
 
 
 def get_admin_password() -> str | None:
@@ -948,6 +1067,18 @@ def student_table(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         "profession": "first",
         "years_experience": "first",
         "group": "first",
+        "gender": "first",
+        "age": "first",
+        "semester": "first",
+        "works_for_studies": "first",
+        "children_count": "first",
+        "academic_program": "first",
+        "academic_shift": "first",
+        "prior_experience_area": "first",
+        "ethics_training": "first",
+        "work_hours_per_week": "first",
+        "caregiving_load": "first",
+        "study_funding_type": "first",
         "timestamp": "first",
     }).reset_index()
 
@@ -998,6 +1129,7 @@ def build_rows(
     years_experience: int,
     group: str,
     anonymize: bool,
+    participant_context: Dict[str, Any],
     choices_payload: List[dict],
     stage_payload: List[dict],
     framework_payload: List[dict],
@@ -1005,16 +1137,21 @@ def build_rows(
     ts = now_iso()
     anon_id = sha_id(student_id) if anonymize else student_id
     rows = []
+    common_fields = {
+        "timestamp": ts,
+        "anon_id": anon_id,
+        "student_id": student_id,
+        "name": name,
+        "profession": profession,
+        "years_experience": int(years_experience),
+        "group": group,
+    }
+    for column in PARTICIPANT_CONTEXT_COLUMNS:
+        common_fields[column] = participant_context.get(column)
 
     for row in choices_payload:
         rows.append({
-            "timestamp": ts,
-            "anon_id": anon_id,
-            "student_id": student_id,
-            "name": name,
-            "profession": profession,
-            "years_experience": int(years_experience),
-            "group": group,
+            **common_fields,
             "row_type": "choice",
             "item_id": row["item_id"],
             "sub_id": "",
@@ -1028,13 +1165,7 @@ def build_rows(
 
     for row in stage_payload:
         rows.append({
-            "timestamp": ts,
-            "anon_id": anon_id,
-            "student_id": student_id,
-            "name": name,
-            "profession": profession,
-            "years_experience": int(years_experience),
-            "group": group,
+            **common_fields,
             "row_type": "stage_likert",
             "item_id": row["item_id"],
             "sub_id": str(row["sub_id"]),
@@ -1048,13 +1179,7 @@ def build_rows(
 
     for row in framework_payload:
         rows.append({
-            "timestamp": ts,
-            "anon_id": anon_id,
-            "student_id": student_id,
-            "name": name,
-            "profession": profession,
-            "years_experience": int(years_experience),
-            "group": group,
+            **common_fields,
             "row_type": "framework_likert",
             "item_id": row["item_id"],
             "sub_id": row["sub_id"],
@@ -1491,6 +1616,18 @@ def build_individual_ai_payload(student_row: pd.Series, rows: pd.DataFrame) -> D
             "profesion": student_row.get("profession"),
             "grupo": normalize_group_label(student_row.get("group")),
             "anos_experiencia": serialize_for_ai(student_row.get("years_experience")),
+            "genero": student_row.get("gender"),
+            "edad": serialize_for_ai(student_row.get("age")),
+            "semestre": serialize_for_ai(student_row.get("semester")),
+            "trabaja_para_pagar_estudios": student_row.get("works_for_studies"),
+            "numero_hijos": serialize_for_ai(student_row.get("children_count")),
+            "programa_academico": student_row.get("academic_program"),
+            "jornada_academica": student_row.get("academic_shift"),
+            "tipo_experiencia_previa": student_row.get("prior_experience_area"),
+            "formacion_previa_etica": student_row.get("ethics_training"),
+            "horas_trabajo_semana": serialize_for_ai(student_row.get("work_hours_per_week")),
+            "carga_cuidado_familiar": student_row.get("caregiving_load"),
+            "financiacion_estudios": student_row.get("study_funding_type"),
             "timestamp": student_row.get("timestamp"),
         },
         "dilemas_respondidos": dilemmas,
@@ -1541,6 +1678,12 @@ def build_group_ai_payload(
             "n_participantes": int(len(students_filtered)),
             "profesiones": sorted(students_filtered["profession"].dropna().astype(str).unique().tolist()),
             "grupos": sorted(students_filtered["group"].fillna("Sin grupo").astype(str).unique().tolist()),
+        },
+        "variables_contextuales": {
+            "resumen_categorico": students_filtered[CONTEXT_CATEGORICAL_COLUMNS].astype(object).fillna("No disponible").apply(
+                lambda col: col.value_counts(dropna=False).head(8).to_dict()
+            ).to_dict(),
+            "resumen_numerico": students_filtered[[col for col in CONTEXT_NUMERIC_COLUMNS if col in students_filtered.columns]].describe(include="all").fillna("").to_dict(),
         },
         "distribucion_profesion": profession_distribution.to_dict(orient="records"),
         "marcos_por_profesion": framework_summary.to_dict(orient="records"),
@@ -1651,6 +1794,7 @@ def create_individual_report_context(
         axis=1,
     )
     choice_export_df["marco_etico"] = choice_export_df["choice_framework"].map(framework_label)
+    participant_context = participant_context_from_row(person.iloc[0]) if not person.empty else {column: None for column in PARTICIPANT_CONTEXT_COLUMNS}
 
     return {
         "rows_df": person,
@@ -1662,6 +1806,7 @@ def create_individual_report_context(
         "years_experience": years_experience,
         "group": group,
         "route_group": route_group,
+        "participant_context": participant_context,
         "choice_df": choice_df,
         "choice_export_df": choice_export_df,
         "choice_detail_df": build_individual_choice_detail_df(choice_df),
@@ -1699,6 +1844,7 @@ def run_individual_ai_analysis(report_context: Dict[str, object], spinner_text: 
         "group": report_context["group"],
         "years_experience": report_context["years_experience"],
         "timestamp": report_context["timestamp"],
+        **(report_context.get("participant_context") or {}),
     })
     payload = build_individual_ai_payload(student_row, report_context["rows_df"])
     try:
@@ -1720,6 +1866,7 @@ def run_individual_ai_analysis(report_context: Dict[str, object], spinner_text: 
 
 def rebuild_individual_report_artifacts(report_context: Dict[str, object]) -> Dict[str, object]:
     dominant_framework = framework_label(report_context["fw_dom"]) if report_context.get("fw_dom") else "No definido"
+    participant_context_rows = build_context_display_rows(report_context.get("participant_context", {}))
     pdf_bytes = build_individual_report_pdf(
         app_title=APP_TITLE,
         app_brand_line=APP_BRAND_LINE,
@@ -1735,6 +1882,7 @@ def rebuild_individual_report_artifacts(report_context: Dict[str, object]) -> Di
             ("Grupo", normalize_group_label(report_context["group"])),
             ("Años de experiencia", report_context["years_experience"]),
             ("Ruta profesional", report_context["route_group"]),
+            *participant_context_rows,
         ],
         metric_rows=[
             ("Nivel global", report_context["k_level"]),
@@ -1785,6 +1933,7 @@ def rebuild_individual_report_artifacts(report_context: Dict[str, object]) -> Di
         fw_scores=report_context["fw_scores"],
         stage_means=report_context["stage_means"],
         choice_df=report_context["choice_export_df"],
+        participant_context=report_context.get("participant_context"),
         ai_interpretation=report_context.get("ai_result"),
         pdf_bytes=pdf_bytes,
     )
@@ -1806,6 +1955,14 @@ def render_individual_report(report_context: Dict[str, object]) -> None:
         f"Participante: {report_context['name']} | Profesión: {report_context['profession']} | "
         f"Grupo: {normalize_group_label(report_context['group'])} | Ruta: {report_context['route_group']}"
     )
+    context_rows = build_context_display_rows(report_context.get("participant_context", {}))
+    if context_rows:
+        with st.expander("Ver variables contextuales del participante"):
+            st.dataframe(
+                pd.DataFrame(context_rows, columns=["Variable", "Valor"]),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     action_col1, action_col2 = st.columns(2)
     retry_label = "Regenerar análisis IA integrado" if report_context.get("ai_result") else "Generar o reintentar análisis IA integrado"
@@ -2278,6 +2435,109 @@ def make_keyword_bubble_chart(keyword_df: pd.DataFrame, group_col: str = "profes
     )
 
 
+def build_contextual_summary_tables(students: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    categorical_rows = []
+    for column in CONTEXT_CATEGORICAL_COLUMNS:
+        if column not in students.columns:
+            continue
+        counts = students[column].fillna("No disponible").astype(str).value_counts(dropna=False)
+        for category, count in counts.items():
+            categorical_rows.append({
+                "variable": CONTEXT_FIELD_LABELS.get(column, column),
+                "categoria": category,
+                "n": int(count),
+                "pct": round(float(count) / max(len(students), 1) * 100, 2),
+            })
+
+    numeric_rows = []
+    for column in CONTEXT_NUMERIC_COLUMNS:
+        if column not in students.columns:
+            continue
+        values = pd.to_numeric(students[column], errors="coerce").dropna()
+        if values.empty:
+            continue
+        numeric_rows.append({
+            "variable": CONTEXT_FIELD_LABELS.get(column, column),
+            "n": int(values.count()),
+            "media": round(float(values.mean()), 2),
+            "mediana": round(float(values.median()), 2),
+            "min": round(float(values.min()), 2),
+            "max": round(float(values.max()), 2),
+        })
+
+    return pd.DataFrame(categorical_rows), pd.DataFrame(numeric_rows)
+
+
+def build_context_outcome_summary(students: pd.DataFrame, context_column: str) -> pd.DataFrame:
+    if context_column not in students.columns:
+        return pd.DataFrame()
+    summary_df = students.copy()
+    summary_df[context_column] = summary_df[context_column].fillna("No disponible")
+    grouped = summary_df.groupby(context_column).agg(
+        participantes=("anon_id", "count"),
+        k_est_promedio=("k_est", "mean"),
+        edad_promedio=("age", "mean"),
+        semestre_promedio=("semester", "mean"),
+        marco_dominante=("fw_dom", lambda s: s.mode().iloc[0] if s.notna().any() else None),
+        nivel_dominante=("k_level", lambda s: s.mode().iloc[0] if s.notna().any() else None),
+    ).reset_index().rename(columns={context_column: "categoria"})
+    return grouped.sort_values("participantes", ascending=False)
+
+
+def make_context_boxplot(students: pd.DataFrame, context_column: str) -> go.Figure:
+    plot_df = students.copy()
+    plot_df[context_column] = plot_df[context_column].fillna("No disponible")
+    fig = px.box(
+        plot_df,
+        x=context_column,
+        y="k_est",
+        color=context_column,
+        points="all",
+        title=f"{CONTEXT_FIELD_LABELS.get(context_column, context_column)} vs k_est",
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+        labels={context_column: CONTEXT_FIELD_LABELS.get(context_column, context_column), "k_est": "Índice k_est"},
+    )
+    fig.update_layout(showlegend=False)
+    return style_academic_figure(fig, f"{CONTEXT_FIELD_LABELS.get(context_column, context_column)} vs k_est", height=500, showlegend=False)
+
+
+def make_context_level_chart(students: pd.DataFrame, context_column: str) -> go.Figure:
+    plot_df = students.copy()
+    plot_df[context_column] = plot_df[context_column].fillna("No disponible")
+    level_distribution = pd.crosstab(plot_df[context_column], plot_df["k_level"], normalize="index") * 100
+    level_distribution = level_distribution.reset_index().melt(id_vars=context_column, var_name="k_level", value_name="pct")
+    fig = px.bar(
+        level_distribution,
+        x=context_column,
+        y="pct",
+        color="k_level",
+        barmode="stack",
+        title=f"Distribución de niveles morales por {CONTEXT_FIELD_LABELS.get(context_column, context_column)}",
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+        labels={context_column: CONTEXT_FIELD_LABELS.get(context_column, context_column), "pct": "Porcentaje (%)", "k_level": "Nivel moral"},
+    )
+    return style_academic_figure(fig, f"Distribución de niveles morales por {CONTEXT_FIELD_LABELS.get(context_column, context_column)}", height=470)
+
+
+def make_numeric_context_scatter(students: pd.DataFrame, context_column: str) -> go.Figure:
+    plot_df = students.copy()
+    plot_df[context_column] = pd.to_numeric(plot_df[context_column], errors="coerce")
+    plot_df = plot_df.dropna(subset=[context_column, "k_est"])
+    if plot_df.empty:
+        return go.Figure()
+    fig = px.scatter(
+        plot_df,
+        x=context_column,
+        y="k_est",
+        color="profession",
+        title=f"{CONTEXT_FIELD_LABELS.get(context_column, context_column)} vs k_est",
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+        labels={context_column: CONTEXT_FIELD_LABELS.get(context_column, context_column), "k_est": "Índice k_est", "profession": "Profesión"},
+        hover_data=["k_level", "fw_dom", "group"],
+    )
+    return style_academic_figure(fig, f"{CONTEXT_FIELD_LABELS.get(context_column, context_column)} vs k_est", height=500)
+
+
 def build_executive_kpi_table(students: pd.DataFrame, quantitative_report: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     k_mean, k_lo, k_hi = bootstrap_ci(students["k_est"].dropna().values, np.mean)
     c_mean, _, _ = bootstrap_ci(students["k_coherence_std"].dropna().values, np.mean)
@@ -2400,7 +2660,7 @@ def page_apply(df: pd.DataFrame) -> None:
         key="apply_profession_selector",
     )
     years_experience = route_col2.number_input(
-        "Años de experiencia",
+        "Años de experiencia laboral o clínica",
         min_value=0,
         max_value=60,
         value=0,
@@ -2415,12 +2675,81 @@ def page_apply(df: pd.DataFrame) -> None:
     st.caption(
         f"Profesión seleccionada: {profession} | Ruta activa: {route_group} | Dilemas visibles: {len(dilemmas)}"
     )
+    semester_max = semester_limit_for_profession(profession)
 
     with st.form("moral_test_form", clear_on_submit=False):
         c1, c2, c3 = st.columns([1, 1, 1])
         student_id = c1.text_input("ID institucional o código", max_chars=60)
         name = c2.text_input("Nombre o seudónimo", max_chars=120)
         group = c3.text_input("Grupo / cohorte / curso", max_chars=120)
+
+        st.markdown("### Perfil sociodemográfico y académico")
+        d1, d2, d3 = st.columns([1.1, 0.9, 0.9])
+        gender = d1.selectbox("Género", options=[""] + GENDER_OPTIONS, key="apply_gender")
+        age = d2.number_input(
+            "Edad",
+            min_value=MIN_AGE,
+            max_value=MAX_AGE,
+            value=max(MIN_AGE, 18),
+            step=1,
+            key="apply_age",
+        )
+        semester = d3.number_input(
+            f"Semestre (1 a {semester_max})",
+            min_value=1,
+            max_value=semester_max,
+            value=min(1, semester_max),
+            step=1,
+            key="apply_semester",
+        )
+
+        d4, d5 = st.columns([1.2, 0.8])
+        works_for_studies = d4.selectbox(
+            "Trabaja para pagar sus estudios",
+            options=[""] + WORK_STUDY_OPTIONS,
+            key="apply_work_study",
+        )
+        children_count = d5.number_input(
+            "Número de hijos",
+            min_value=0,
+            max_value=MAX_CHILDREN,
+            value=0,
+            step=1,
+            key="apply_children_count",
+        )
+
+        with st.expander("Variables contextuales opcionales"):
+            o1, o2, o3 = st.columns(3)
+            academic_program = o1.text_input("Programa académico o denominación específica", max_chars=120)
+            academic_shift = o2.selectbox("Jornada académica", options=ACADEMIC_SHIFT_OPTIONS, key="apply_academic_shift")
+            prior_experience_area = o3.selectbox(
+                "Experiencia laboral o clínica previa",
+                options=PRIOR_EXPERIENCE_OPTIONS,
+                key="apply_prior_experience_area",
+            )
+
+            o4, o5, o6 = st.columns(3)
+            ethics_training = o4.selectbox(
+                "Formación previa en ética o bioética",
+                options=ETHICS_TRAINING_OPTIONS,
+                key="apply_ethics_training",
+            )
+            work_hours_per_week_input = o5.text_input(
+                "Horas de trabajo por semana",
+                max_chars=3,
+                placeholder="0-80",
+            )
+            caregiving_load = o6.selectbox(
+                "Carga de cuidado familiar",
+                options=CAREGIVING_LOAD_OPTIONS,
+                key="apply_caregiving_load",
+            )
+
+            study_funding_type = st.selectbox(
+                "Tipo de financiación de estudios",
+                options=STUDY_FUNDING_OPTIONS,
+                key="apply_study_funding_type",
+            )
 
         st.markdown("### A. Dilemas y justificación argumentativa")
         st.caption("Se exige una justificación breve con razonamiento suficiente; evita respuestas telegráficas.")
@@ -2493,6 +2822,42 @@ def page_apply(df: pd.DataFrame) -> None:
             errors.append("Debes diligenciar el ID institucional o código.")
         if not name.strip():
             errors.append("Debes diligenciar el nombre o seudónimo.")
+        if not gender:
+            errors.append("Debes seleccionar el género.")
+        if not works_for_studies:
+            errors.append("Debes indicar si trabajas para pagar tus estudios.")
+        if int(age) < MIN_AGE or int(age) > MAX_AGE:
+            errors.append(f"La edad debe estar entre {MIN_AGE} y {MAX_AGE} años.")
+        if int(semester) < 1 or int(semester) > semester_max:
+            errors.append(f"El semestre para {profession} debe estar entre 1 y {semester_max}.")
+        if int(children_count) < 0 or int(children_count) > MAX_CHILDREN:
+            errors.append(f"El número de hijos debe estar entre 0 y {MAX_CHILDREN}.")
+
+        try:
+            work_hours_per_week = optional_int_from_text(
+                work_hours_per_week_input,
+                minimum=0,
+                maximum=MAX_WORK_HOURS,
+                field_label="Las horas de trabajo por semana",
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+            work_hours_per_week = None
+
+        participant_context = {
+            "gender": gender,
+            "age": int(age),
+            "semester": int(semester),
+            "works_for_studies": works_for_studies,
+            "children_count": int(children_count),
+            "academic_program": optional_text(academic_program),
+            "academic_shift": optional_text(academic_shift),
+            "prior_experience_area": optional_text(prior_experience_area),
+            "ethics_training": optional_text(ethics_training),
+            "work_hours_per_week": work_hours_per_week,
+            "caregiving_load": optional_text(caregiving_load),
+            "study_funding_type": optional_text(study_funding_type),
+        }
 
         choices_payload = []
         for dilemma, selected_label, justification in collected_choices:
@@ -2527,6 +2892,7 @@ def page_apply(df: pd.DataFrame) -> None:
                 years_experience=int(years_experience),
                 group=group.strip(),
                 anonymize=anonymize,
+                participant_context=participant_context,
                 choices_payload=choices_payload,
                 stage_payload=stage_values,
                 framework_payload=framework_values,
@@ -2657,6 +3023,7 @@ def page_dashboard(df: pd.DataFrame) -> None:
     framework_ci_summary = quantitative_report.get("framework_ci_summary", pd.DataFrame()).copy()
     stage_summary_df = quantitative_report.get("stage_summary", pd.DataFrame()).copy()
     consistency_df = internal_consistency_estimate(df_last_filtered)
+    contextual_categorical_df, contextual_numeric_df = build_contextual_summary_tables(students_filtered)
     collective_choice_df = df_last_filtered[df_last_filtered["row_type"] == "choice"].copy()
     if not collective_choice_df.empty:
         collective_choice_df["framework_label"] = collective_choice_df["choice_framework"].map(framework_label)
@@ -2669,6 +3036,7 @@ def page_dashboard(df: pd.DataFrame) -> None:
         "3. Análisis por profesión",
         "4. Análisis cualitativo",
         "5. Interpretación integrada",
+        "6. Contexto ampliado",
     ])
 
     with tabs[0]:
@@ -2774,6 +3142,14 @@ def page_dashboard(df: pd.DataFrame) -> None:
         st.caption(
             f"Grupo: {normalize_group_label(selected_student['group'])} | Estadio redondeado: {ind_k_stage} | Coherencia interna: {ind_coherence:.2f}"
         )
+        selected_context_rows = build_context_display_rows(participant_context_from_row(selected_student))
+        if selected_context_rows:
+            with st.expander("Ver contexto sociodemográfico, académico y laboral"):
+                st.dataframe(
+                    pd.DataFrame(selected_context_rows, columns=["Variable", "Valor"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
         ind_col1, ind_col2 = st.columns([1, 1])
         with ind_col1:
@@ -3080,6 +3456,94 @@ def page_dashboard(df: pd.DataFrame) -> None:
         st.info(
             f"Los archivos del análisis individual y colectivo también se guardan automáticamente en la carpeta administrativa del servidor: {ADMIN_REPORT_STORE.base_dir}."
         )
+
+    with tabs[5]:
+        st.markdown(
+            """
+            <div class="section-card">
+                <h3>Contexto sociodemográfico, académico y laboral</h3>
+                <p>Relaciona variables contextuales del participante con k_est, nivel moral dominante y marco ético predominante para apoyar lecturas comparativas prudentes.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        context_col1, context_col2 = st.columns([1, 1])
+        with context_col1:
+            st.markdown("#### Resumen categórico")
+            if contextual_categorical_df.empty:
+                st.info("No hay variables categóricas contextuales suficientes para resumir.")
+            else:
+                st.dataframe(contextual_categorical_df, use_container_width=True, hide_index=True)
+        with context_col2:
+            st.markdown("#### Resumen numérico")
+            if contextual_numeric_df.empty:
+                st.info("No hay variables numéricas contextuales suficientes para resumir.")
+            else:
+                st.dataframe(contextual_numeric_df, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Cruces contextuales con resultados")
+        analysis_mode = st.radio(
+            "Tipo de variable contextual",
+            options=["Categórica", "Numérica"],
+            horizontal=True,
+        )
+
+        if analysis_mode == "Categórica":
+            available_columns = [column for column in CONTEXT_CATEGORICAL_COLUMNS if column in students_filtered.columns and students_filtered[column].notna().any()]
+            if not available_columns:
+                st.info("No hay variables categóricas con datos disponibles para análisis relacional.")
+            else:
+                selected_context = st.selectbox(
+                    "Variable categórica",
+                    options=available_columns,
+                    format_func=lambda column: CONTEXT_FIELD_LABELS.get(column, column),
+                )
+                outcome_summary = build_context_outcome_summary(students_filtered, selected_context)
+                context_chart_col1, context_chart_col2 = st.columns([1, 1])
+                with context_chart_col1:
+                    box_fig = make_context_boxplot(students_filtered, selected_context)
+                    render_plotly_figure(
+                        box_fig,
+                        f"contexto_kest_{selected_context}",
+                        data_df=outcome_summary,
+                        caption="Distribución de k_est en cada categoría contextual observada.",
+                    )
+                with context_chart_col2:
+                    level_fig = make_context_level_chart(students_filtered, selected_context)
+                    render_plotly_figure(
+                        level_fig,
+                        f"contexto_nivel_{selected_context}",
+                        data_df=outcome_summary,
+                        caption="Composición porcentual de niveles morales dominantes por categoría contextual.",
+                    )
+                st.dataframe(outcome_summary, use_container_width=True, hide_index=True)
+        else:
+            available_numeric_columns = [column for column in CONTEXT_NUMERIC_COLUMNS if column in students_filtered.columns and pd.to_numeric(students_filtered[column], errors="coerce").notna().any()]
+            if not available_numeric_columns:
+                st.info("No hay variables numéricas con datos disponibles para análisis relacional.")
+            else:
+                selected_numeric_context = st.selectbox(
+                    "Variable numérica",
+                    options=available_numeric_columns,
+                    format_func=lambda column: CONTEXT_FIELD_LABELS.get(column, column),
+                )
+                numeric_fig = make_numeric_context_scatter(students_filtered, selected_numeric_context)
+                numeric_df = students_filtered[[selected_numeric_context, "k_est", "k_level", "fw_dom", "profession", "group"]].copy()
+                numeric_df = numeric_df.rename(columns={selected_numeric_context: CONTEXT_FIELD_LABELS.get(selected_numeric_context, selected_numeric_context)})
+                render_plotly_figure(
+                    numeric_fig,
+                    f"contexto_numerico_{selected_numeric_context}",
+                    data_df=numeric_df,
+                    caption="Relación descriptiva entre la variable contextual seleccionada y el índice k_est.",
+                )
+                corr_df = students_filtered[[selected_numeric_context, "k_est"]].copy()
+                corr_df[selected_numeric_context] = pd.to_numeric(corr_df[selected_numeric_context], errors="coerce")
+                corr_df = corr_df.dropna()
+                correlation = corr_df[selected_numeric_context].corr(corr_df["k_est"]) if len(corr_df) >= 3 else np.nan
+                st.caption(
+                    f"Correlación descriptiva con k_est: {correlation:.2f}" if pd.notna(correlation) else "No hay suficientes casos para estimar una correlación descriptiva estable."
+                )
 
 
 def page_deployment() -> None:

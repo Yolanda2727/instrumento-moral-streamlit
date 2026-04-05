@@ -60,6 +60,7 @@ class AdminReportStore:
         fw_scores: Dict[str, float],
         stage_means: Dict[int, float],
         choice_df: pd.DataFrame,
+        participant_context: Dict[str, Any] | None = None,
         ai_interpretation: Dict[str, Any] | None = None,
         pdf_bytes: bytes | None = None,
     ) -> Dict[str, str]:
@@ -86,6 +87,7 @@ class AdminReportStore:
             "framework_dominant": fw_dom,
             "framework_scores": fw_scores,
             "stage_means": stage_means,
+            "participant_context": participant_context or {},
         }
 
         json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

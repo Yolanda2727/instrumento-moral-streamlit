@@ -9,20 +9,20 @@ from uuid import uuid4
 
 import numpy as np
 import pandas as pd
+from data_schema import (
+    COLUMNS,
+    PARTICIPANT_CONTEXT_COLUMNS,
+    PARTICIPANT_CONTEXT_COLUMN_TYPES,
+    aggregate_metric_columns,
+    attempt_select_columns,
+    attempt_summary_select_columns,
+    response_select_columns,
+)
 
 try:
     import psycopg
 except Exception:  # pragma: no cover
     psycopg = None
-
-COLUMNS = [
-    "timestamp", "anon_id", "student_id", "name", "profession", "years_experience", "group",
-    "gender", "age", "semester", "works_for_studies", "children_count",
-    "academic_program", "academic_shift", "prior_experience_area", "ethics_training",
-    "work_hours_per_week", "caregiving_load", "study_funding_type",
-    "row_type", "item_id", "sub_id", "choice_key", "choice_stage", "choice_level", "choice_framework",
-    "likert_value", "text",
-]
 
 ATTEMPTS_TABLE = "participant_attempts"
 RESPONSES_TABLE = "attempt_responses"
@@ -30,21 +30,6 @@ ATTEMPT_METADATA_COLUMNS = {
     "n_dilemmas_answered": "INTEGER",
     "n_justifications": "INTEGER",
     "responded_item_ids": "TEXT",
-}
-
-ATTEMPT_PROFILE_COLUMNS = {
-    "gender": "TEXT",
-    "age": "INTEGER",
-    "semester": "INTEGER",
-    "works_for_studies": "TEXT",
-    "children_count": "INTEGER",
-    "academic_program": "TEXT",
-    "academic_shift": "TEXT",
-    "prior_experience_area": "TEXT",
-    "ethics_training": "TEXT",
-    "work_hours_per_week": "INTEGER",
-    "caregiving_load": "TEXT",
-    "study_funding_type": "TEXT",
 }
 
 
@@ -113,40 +98,37 @@ class PersistenceStore:
         with self._connect() as conn:
             query = f"""
                 SELECT
-                    a.timestamp,
-                    a.anon_id,
-                    a.student_id,
-                    a.name,
-                    a.profession,
-                    a.years_experience,
-                    a.group_name AS "group",
-                    a.gender,
-                    a.age,
-                    a.semester,
-                    a.works_for_studies,
-                    a.children_count,
-                    a.academic_program,
-                    a.academic_shift,
-                    a.prior_experience_area,
-                    a.ethics_training,
-                    a.work_hours_per_week,
-                    a.caregiving_load,
-                    a.study_funding_type,
-                    r.row_type,
-                    r.item_id,
-                    r.sub_id,
-                    r.choice_key,
-                    r.choice_stage,
-                    r.choice_level,
-                    r.choice_framework,
-                    r.likert_value,
-                    r.text_value AS text
+                    {self._attempt_response_select_sql()}
                 FROM {ATTEMPTS_TABLE} a
                 JOIN {RESPONSES_TABLE} r ON r.attempt_id = a.attempt_id
                 ORDER BY a.timestamp, r.response_order
             """
             rows = self._read_sql(conn, query)
         return self._normalize_dataframe(rows)
+
+    def get_analysis_frame(
+        self,
+        profession: str | None = None,
+        group_name: str | None = None,
+        anon_id: str | None = None,
+        limit: int | None = None,
+        include_raw_payload: bool = False,
+    ) -> pd.DataFrame:
+        self.ensure_storage()
+        with self._connect() as conn:
+            query = f"""
+                SELECT
+                    {self._attempt_summary_select_sql(include_raw_payload=include_raw_payload)}
+                FROM {ATTEMPTS_TABLE} a
+            """
+            query, params = self._append_attempt_filters(
+                query,
+                profession=profession,
+                group_name=group_name,
+                anon_id=anon_id,
+                limit=limit,
+            )
+            return self._read_sql(conn, query, params)
 
     def get_attempt_summaries(
         self,
@@ -155,54 +137,13 @@ class PersistenceStore:
         anon_id: str | None = None,
         limit: int | None = None,
     ) -> pd.DataFrame:
-        self.ensure_storage()
-        with self._connect() as conn:
-            placeholder = self._placeholder
-            query = f"""
-                SELECT
-                    attempt_id,
-                    timestamp,
-                    anon_id,
-                    student_id,
-                    name,
-                    profession,
-                    years_experience,
-                    group_name AS "group",
-                    gender,
-                    age,
-                    semester,
-                    works_for_studies,
-                    children_count,
-                    academic_program,
-                    academic_shift,
-                    prior_experience_area,
-                    ethics_training,
-                    work_hours_per_week,
-                    caregiving_load,
-                    study_funding_type,
-                    n_dilemmas_answered,
-                    n_justifications,
-                    responded_item_ids,
-                    created_at
-                FROM {ATTEMPTS_TABLE}
-            """
-            filters: list[str] = []
-            params: list[Any] = []
-            if profession:
-                filters.append(f"profession = {placeholder}")
-                params.append(profession)
-            if group_name:
-                filters.append(f"group_name = {placeholder}")
-                params.append(group_name)
-            if anon_id:
-                filters.append(f"anon_id = {placeholder}")
-                params.append(anon_id)
-            if filters:
-                query += " WHERE " + " AND ".join(filters)
-            query += " ORDER BY timestamp DESC"
-            if limit is not None and limit > 0:
-                query += f" LIMIT {int(limit)}"
-            return self._read_sql(conn, query, params)
+        return self.get_analysis_frame(
+            profession=profession,
+            group_name=group_name,
+            anon_id=anon_id,
+            limit=limit,
+            include_raw_payload=False,
+        )
 
     def get_last_attempt_rows(self, anon_id: str) -> pd.DataFrame:
         self.ensure_storage()
@@ -210,39 +151,12 @@ class PersistenceStore:
             placeholder = self._placeholder
             query = f"""
                 SELECT
-                    a.timestamp,
-                    a.anon_id,
-                    a.student_id,
-                    a.name,
-                    a.profession,
-                    a.years_experience,
-                    a.group_name AS "group",
-                    a.gender,
-                    a.age,
-                    a.semester,
-                    a.works_for_studies,
-                    a.children_count,
-                    a.academic_program,
-                    a.academic_shift,
-                    a.prior_experience_area,
-                    a.ethics_training,
-                    a.work_hours_per_week,
-                    a.caregiving_load,
-                    a.study_funding_type,
-                    r.row_type,
-                    r.item_id,
-                    r.sub_id,
-                    r.choice_key,
-                    r.choice_stage,
-                    r.choice_level,
-                    r.choice_framework,
-                    r.likert_value,
-                    r.text_value AS text
+                    {self._attempt_response_select_sql()}
                 FROM {ATTEMPTS_TABLE} a
                 JOIN {RESPONSES_TABLE} r ON r.attempt_id = a.attempt_id
-                                WHERE a.anon_id = {placeholder}
+                WHERE a.anon_id = {placeholder}
                   AND a.timestamp = (
-                                        SELECT MAX(timestamp) FROM {ATTEMPTS_TABLE} WHERE anon_id = {placeholder}
+                    SELECT MAX(timestamp) FROM {ATTEMPTS_TABLE} WHERE anon_id = {placeholder}
                   )
                 ORDER BY r.response_order
             """
@@ -256,34 +170,7 @@ class PersistenceStore:
             placeholder = self._placeholder
             query = f"""
                 SELECT
-                    a.timestamp,
-                    a.anon_id,
-                    a.student_id,
-                    a.name,
-                    a.profession,
-                    a.years_experience,
-                    a.group_name AS "group",
-                    a.gender,
-                    a.age,
-                    a.semester,
-                    a.works_for_studies,
-                    a.children_count,
-                    a.academic_program,
-                    a.academic_shift,
-                    a.prior_experience_area,
-                    a.ethics_training,
-                    a.work_hours_per_week,
-                    a.caregiving_load,
-                    a.study_funding_type,
-                    r.row_type,
-                    r.item_id,
-                    r.sub_id,
-                    r.choice_key,
-                    r.choice_stage,
-                    r.choice_level,
-                    r.choice_framework,
-                    r.likert_value,
-                    r.text_value AS text
+                    {self._attempt_response_select_sql()}
                 FROM {ATTEMPTS_TABLE} a
                 JOIN {RESPONSES_TABLE} r ON r.attempt_id = a.attempt_id
                 WHERE a.anon_id = {placeholder}
@@ -298,34 +185,7 @@ class PersistenceStore:
             placeholder = self._placeholder
             query = f"""
                 SELECT
-                    a.timestamp,
-                    a.anon_id,
-                    a.student_id,
-                    a.name,
-                    a.profession,
-                    a.years_experience,
-                    a.group_name AS "group",
-                    a.gender,
-                    a.age,
-                    a.semester,
-                    a.works_for_studies,
-                    a.children_count,
-                    a.academic_program,
-                    a.academic_shift,
-                    a.prior_experience_area,
-                    a.ethics_training,
-                    a.work_hours_per_week,
-                    a.caregiving_load,
-                    a.study_funding_type,
-                    r.row_type,
-                    r.item_id,
-                    r.sub_id,
-                    r.choice_key,
-                    r.choice_stage,
-                    r.choice_level,
-                    r.choice_framework,
-                    r.likert_value,
-                    r.text_value AS text
+                    {self._attempt_response_select_sql()}
                 FROM {ATTEMPTS_TABLE} a
                 JOIN {RESPONSES_TABLE} r ON r.attempt_id = a.attempt_id
                 WHERE a.group_name = {placeholder}
@@ -335,32 +195,10 @@ class PersistenceStore:
         return self._normalize_dataframe(rows)
 
     def get_profession_comparison(self, professions: Sequence[str] | None = None) -> pd.DataFrame:
-        self.ensure_storage()
-        with self._connect() as conn:
-            query = f"""
-                SELECT
-                    profession,
-                    COUNT(*) AS attempts,
-                    COUNT(DISTINCT anon_id) AS participants,
-                    AVG(age) AS avg_age,
-                    AVG(semester) AS avg_semester,
-                    AVG(years_experience) AS avg_years_experience,
-                    AVG(work_hours_per_week) AS avg_work_hours_per_week,
-                    AVG(children_count) AS avg_children_count,
-                    AVG(n_dilemmas_answered) AS avg_dilemmas_answered,
-                    AVG(n_justifications) AS avg_justifications,
-                    MIN(timestamp) AS first_attempt_at,
-                    MAX(timestamp) AS last_attempt_at
-                FROM {ATTEMPTS_TABLE}
-            """
-            params: list[Any] = []
-            if professions:
-                placeholders = ", ".join(self._placeholder for _ in professions)
-                query += f" WHERE profession IN ({placeholders})"
-                params.extend(list(professions))
-            query += " GROUP BY profession ORDER BY attempts DESC, profession ASC"
-            rows = self._read_sql(conn, query, params)
-        return rows
+        return self._comparison_frame(group_column="profession", values=professions, order_label="profession")
+
+    def get_cohort_comparison(self, groups: Sequence[str] | None = None) -> pd.DataFrame:
+        return self._comparison_frame(group_column="group_name", values=groups, order_label="group_name")
 
     def run_query(self, query_name: str, **filters: Any) -> pd.DataFrame:
         if query_name == "last_attempt":
@@ -381,6 +219,17 @@ class PersistenceStore:
         if query_name == "profession_comparison":
             professions = filters.get("professions")
             return self.get_profession_comparison(professions)
+        if query_name == "cohort_comparison":
+            groups = filters.get("groups")
+            return self.get_cohort_comparison(groups)
+        if query_name == "analysis_frame":
+            return self.get_analysis_frame(
+                profession=filters.get("profession"),
+                group_name=filters.get("group_name"),
+                anon_id=filters.get("anon_id"),
+                limit=filters.get("limit"),
+                include_raw_payload=bool(filters.get("include_raw_payload", False)),
+            )
         if query_name == "attempt_summaries":
             return self.get_attempt_summaries(
                 profession=filters.get("profession"),
@@ -417,7 +266,7 @@ class PersistenceStore:
         choice_rows = rows[rows["row_type"] == "choice"].copy()
         responded_item_ids = sorted(choice_rows["item_id"].dropna().astype(str).unique().tolist())
         n_justifications = int(choice_rows["text"].fillna("").astype(str).str.strip().ne("").sum())
-        return {
+        meta = {
             "attempt_id": f"{first['anon_id']}_{first['timestamp']}_{uuid4().hex[:8]}",
             "timestamp": str(first["timestamp"]),
             "anon_id": _to_optional_str(first["anon_id"]),
@@ -426,23 +275,18 @@ class PersistenceStore:
             "profession": _to_optional_str(first["profession"]),
             "years_experience": _to_optional_int(first["years_experience"]),
             "group_name": _to_optional_str(first["group"]),
-            "gender": _to_optional_str(first.get("gender")),
-            "age": _to_optional_int(first.get("age")),
-            "semester": _to_optional_int(first.get("semester")),
-            "works_for_studies": _to_optional_str(first.get("works_for_studies")),
-            "children_count": _to_optional_int(first.get("children_count")),
-            "academic_program": _to_optional_str(first.get("academic_program")),
-            "academic_shift": _to_optional_str(first.get("academic_shift")),
-            "prior_experience_area": _to_optional_str(first.get("prior_experience_area")),
-            "ethics_training": _to_optional_str(first.get("ethics_training")),
-            "work_hours_per_week": _to_optional_int(first.get("work_hours_per_week")),
-            "caregiving_load": _to_optional_str(first.get("caregiving_load")),
-            "study_funding_type": _to_optional_str(first.get("study_funding_type")),
             "n_dilemmas_answered": int(len(responded_item_ids)),
             "n_justifications": n_justifications,
             "responded_item_ids": ", ".join(responded_item_ids),
             "raw_payload": rows.to_json(orient="records", force_ascii=False),
         }
+        for column in PARTICIPANT_CONTEXT_COLUMNS:
+            value = first.get(column)
+            if PARTICIPANT_CONTEXT_COLUMN_TYPES.get(column) == "INTEGER":
+                meta[column] = _to_optional_int(value)
+            else:
+                meta[column] = _to_optional_str(value)
+        return meta
 
     def _extract_response_records(self, rows: pd.DataFrame) -> list[Dict[str, Any]]:
         records = []
@@ -479,6 +323,9 @@ class PersistenceStore:
 
     def _ensure_schema(self, conn) -> None:
         response_id_column = "BIGSERIAL PRIMARY KEY" if self.config.backend == "supabase" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        context_columns_sql = ",\n                ".join(
+            f"{column_name} {column_type}" for column_name, column_type in PARTICIPANT_CONTEXT_COLUMN_TYPES.items()
+        )
         attempts_sql = f"""
             CREATE TABLE IF NOT EXISTS {ATTEMPTS_TABLE} (
                 attempt_id TEXT PRIMARY KEY,
@@ -489,18 +336,7 @@ class PersistenceStore:
                 profession TEXT,
                 years_experience INTEGER,
                 group_name TEXT,
-                gender TEXT,
-                age INTEGER,
-                semester INTEGER,
-                works_for_studies TEXT,
-                children_count INTEGER,
-                academic_program TEXT,
-                academic_shift TEXT,
-                prior_experience_area TEXT,
-                ethics_training TEXT,
-                work_hours_per_week INTEGER,
-                caregiving_load TEXT,
-                study_funding_type TEXT,
+                {context_columns_sql},
                 n_dilemmas_answered INTEGER,
                 n_justifications INTEGER,
                 responded_item_ids TEXT,
@@ -547,7 +383,7 @@ class PersistenceStore:
     def _ensure_attempt_profile_columns(self, conn) -> None:
         existing_columns = self._existing_columns(conn, ATTEMPTS_TABLE)
         cursor = conn.cursor()
-        for column_name, column_type in ATTEMPT_PROFILE_COLUMNS.items():
+        for column_name, column_type in PARTICIPANT_CONTEXT_COLUMN_TYPES.items():
             if column_name in existing_columns:
                 continue
             cursor.execute(f"ALTER TABLE {ATTEMPTS_TABLE} ADD COLUMN {column_name} {column_type}")
@@ -577,9 +413,7 @@ class PersistenceStore:
         columns = [
             "attempt_id", "timestamp", "anon_id", "student_id", "name",
             "profession", "years_experience", "group_name",
-            "gender", "age", "semester", "works_for_studies", "children_count",
-            "academic_program", "academic_shift", "prior_experience_area", "ethics_training",
-            "work_hours_per_week", "caregiving_load", "study_funding_type",
+            *PARTICIPANT_CONTEXT_COLUMNS,
             "n_dilemmas_answered",
             "n_justifications", "responded_item_ids", "raw_payload",
         ]
@@ -598,6 +432,65 @@ class PersistenceStore:
             """
         conn.execute(sql, values)
         conn.commit()
+
+    def _attempt_response_select_sql(self) -> str:
+        return ",\n                    ".join([*attempt_select_columns("a"), *response_select_columns("r")])
+
+    def _attempt_summary_select_sql(self, include_raw_payload: bool = False) -> str:
+        summary_columns = ["a.attempt_id", *attempt_summary_select_columns("a", include_raw_payload=include_raw_payload)]
+        return ",\n                    ".join(summary_columns)
+
+    def _append_attempt_filters(
+        self,
+        query: str,
+        *,
+        profession: str | None = None,
+        group_name: str | None = None,
+        anon_id: str | None = None,
+        limit: int | None = None,
+    ) -> tuple[str, list[Any]]:
+        placeholder = self._placeholder
+        filters: list[str] = []
+        params: list[Any] = []
+        if profession:
+            filters.append(f"a.profession = {placeholder}")
+            params.append(profession)
+        if group_name:
+            filters.append(f"a.group_name = {placeholder}")
+            params.append(group_name)
+        if anon_id:
+            filters.append(f"a.anon_id = {placeholder}")
+            params.append(anon_id)
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
+        query += " ORDER BY a.timestamp DESC"
+        if limit is not None and limit > 0:
+            query += f" LIMIT {int(limit)}"
+        return query, params
+
+    def _comparison_frame(self, group_column: str, values: Sequence[str] | None = None, order_label: str | None = None) -> pd.DataFrame:
+        self.ensure_storage()
+        label = order_label or group_column
+        aggregate_sql = aggregate_metric_columns()
+        metrics = ",\n                    ".join([f"{expression} AS {alias}" for alias, expression in aggregate_sql.items()])
+        with self._connect() as conn:
+            query = f"""
+                SELECT
+                    {group_column} AS comparison_group,
+                    COUNT(*) AS attempts,
+                    COUNT(DISTINCT anon_id) AS participants,
+                    {metrics},
+                    MIN(timestamp) AS first_attempt_at,
+                    MAX(timestamp) AS last_attempt_at
+                FROM {ATTEMPTS_TABLE}
+            """
+            params: list[Any] = []
+            if values:
+                placeholders = ", ".join(self._placeholder for _ in values)
+                query += f" WHERE {group_column} IN ({placeholders})"
+                params.extend(list(values))
+            query += f" GROUP BY {group_column} ORDER BY attempts DESC, {label} ASC"
+            return self._read_sql(conn, query, params)
 
     def _replace_attempt_rows(self, conn, attempt_id: str, records: Iterable[Dict[str, Any]]) -> None:
         placeholder = self._placeholder

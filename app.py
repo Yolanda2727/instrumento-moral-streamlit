@@ -27,7 +27,26 @@ from analysis_module import (
     internal_consistency_estimate,
     profession_interpretive_trends,
 )
-from persistence import COLUMNS, load_persistence_store
+from data_schema import (
+    COLUMNS,
+    ACADEMIC_SHIFT_OPTIONS,
+    CAREGIVING_LOAD_OPTIONS,
+    CONTEXT_CATEGORICAL_COLUMNS,
+    CONTEXT_FIELD_LABELS,
+    CONTEXT_NUMERIC_COLUMNS,
+    ETHICS_TRAINING_OPTIONS,
+    GENDER_OPTIONS,
+    MAX_AGE,
+    MAX_CHILDREN,
+    MAX_WORK_HOURS,
+    MIN_AGE,
+    PARTICIPANT_CONTEXT_COLUMNS,
+    PRIOR_EXPERIENCE_OPTIONS,
+    STUDY_FUNDING_OPTIONS,
+    WORK_STUDY_OPTIONS,
+    semester_limit_for_profession as schema_semester_limit_for_profession,
+)
+from persistence import load_persistence_store
 from services.openai_interpreter import OpenAIInterpreterError, interpret_payload
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
@@ -58,10 +77,6 @@ DEFAULT_ROUTE_SIZE = 8
 MIN_JUSTIFICATION_CHARS = 25
 ADMIN_SESSION_KEY = "admin_authenticated"
 INDIVIDUAL_REPORT_SESSION_KEY = "latest_individual_report"
-MIN_AGE = 16
-MAX_AGE = 85
-MAX_CHILDREN = 20
-MAX_WORK_HOURS = 80
 AUTHOR_NAME = "Profesor Anderson Díaz Pérez"
 AUTHOR_CREDENTIALS = [
     "Doctor en Bioética",
@@ -689,82 +704,6 @@ validate_profession_routes()
 
 PROFESSION_DISPLAY_ORDER = PROFESSION_OPTIONS + list(LEGACY_PROFESSION_LABELS.keys())
 
-PARTICIPANT_CONTEXT_COLUMNS = [
-    "gender",
-    "age",
-    "semester",
-    "works_for_studies",
-    "children_count",
-    "academic_program",
-    "academic_shift",
-    "prior_experience_area",
-    "ethics_training",
-    "work_hours_per_week",
-    "caregiving_load",
-    "study_funding_type",
-]
-
-CONTEXT_FIELD_LABELS = {
-    "gender": "Género",
-    "age": "Edad",
-    "semester": "Semestre",
-    "works_for_studies": "Trabaja para pagar estudios",
-    "children_count": "Número de hijos",
-    "academic_program": "Programa académico",
-    "academic_shift": "Jornada académica",
-    "prior_experience_area": "Experiencia laboral o clínica previa",
-    "ethics_training": "Formación previa en ética o bioética",
-    "work_hours_per_week": "Horas de trabajo por semana",
-    "caregiving_load": "Carga de cuidado familiar",
-    "study_funding_type": "Tipo de financiación de estudios",
-    "years_experience": "Años de experiencia",
-}
-
-CONTEXT_CATEGORICAL_COLUMNS = [
-    "gender",
-    "works_for_studies",
-    "academic_shift",
-    "prior_experience_area",
-    "ethics_training",
-    "caregiving_load",
-    "study_funding_type",
-]
-
-CONTEXT_NUMERIC_COLUMNS = [
-    "age",
-    "semester",
-    "years_experience",
-    "children_count",
-    "work_hours_per_week",
-]
-
-GENDER_OPTIONS = ["Mujer", "Hombre", "No binario", "Otro", "Prefiere no responder"]
-WORK_STUDY_OPTIONS = ["Sí", "No", "Parcialmente"]
-ACADEMIC_SHIFT_OPTIONS = ["", "Diurna", "Nocturna", "Mixta", "Fin de semana", "Otra"]
-PRIOR_EXPERIENCE_OPTIONS = ["", "Ninguna", "Laboral", "Clínica", "Laboral y clínica", "Otra"]
-ETHICS_TRAINING_OPTIONS = ["", "Ninguna", "Curso corto", "Asignatura formal", "Diplomado o posgrado", "Otra"]
-CAREGIVING_LOAD_OPTIONS = ["", "Ninguna", "Baja", "Moderada", "Alta", "Muy alta"]
-STUDY_FUNDING_OPTIONS = ["", "Recursos propios", "Apoyo familiar", "Beca", "Crédito", "Mixta", "Institucional", "Otra"]
-
-SEMESTER_LIMITS_BY_PROFESSION = {
-    "Medicina": 14,
-    "Enfermería": 10,
-    "Fisioterapia": 10,
-    "Instrumentación Quirúrgica": 10,
-    "Bacteriología": 10,
-    "Microbiología": 10,
-    "Derecho": 10,
-    "Ciencias Sociales": 10,
-    "Educación": 10,
-    "Ingeniería": 10,
-    "TI": 10,
-    "Datos": 10,
-    "Otra / Mixta": 12,
-    "Salud (legado)": 10,
-    "Derecho / Ciencias Sociales / Educación (legado)": 10,
-    "Ingeniería / TI / Datos (legado)": 10,
-}
-
 
 # =========================
 # Utilidades de datos
@@ -783,13 +722,28 @@ def load_df_cached(cache_key: str) -> pd.DataFrame:
     return df[COLUMNS].copy()
 
 
+@st.cache_data(show_spinner=False)
+def load_attempt_analysis_cached(cache_key: str) -> pd.DataFrame:
+    del cache_key
+    ensure_storage()
+    df = PERSISTENCE_STORE.get_analysis_frame()
+    if "profession" in df.columns:
+        df["profession"] = df["profession"].apply(normalize_profession_label)
+    return df.copy()
+
+
 def load_df() -> pd.DataFrame:
     return load_df_cached(PERSISTENCE_STORE.backend_detail)
+
+
+def load_attempt_analysis_frame() -> pd.DataFrame:
+    return load_attempt_analysis_cached(PERSISTENCE_STORE.backend_detail)
 
 
 def save_attempt_rows(df: pd.DataFrame) -> None:
     PERSISTENCE_STORE.save_rows(df)
     load_df_cached.clear()
+    load_attempt_analysis_cached.clear()
 
 
 def sha_id(value: str) -> str:
@@ -866,7 +820,7 @@ def normalize_group_label(value: str | None) -> str:
 
 def semester_limit_for_profession(profession: str | None) -> int:
     normalized = normalize_profession_label(profession)
-    return SEMESTER_LIMITS_BY_PROFESSION.get(normalized or "", 12)
+    return schema_semester_limit_for_profession(normalized)
 
 
 def optional_text(value: Any) -> str | None:
@@ -900,6 +854,9 @@ def build_context_display_rows(context: Dict[str, Any]) -> List[tuple[str, Any]]
         if value is None or (isinstance(value, float) and pd.isna(value)):
             continue
         rows.append((CONTEXT_FIELD_LABELS.get(column, column), value))
+    years_experience = context.get("years_experience")
+    if years_experience is not None and not (isinstance(years_experience, float) and pd.isna(years_experience)):
+        rows.append(("Años de experiencia", years_experience))
     return rows
 
 
@@ -1120,6 +1077,78 @@ def student_table(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     students = students.merge(choice_summary, on="anon_id", how="left")
     students["profession"] = students["profession"].apply(normalize_profession_label)
     return students, df_last
+
+
+def build_exploratory_model_frame(analysis_df: pd.DataFrame, students_df: pd.DataFrame) -> pd.DataFrame:
+    if analysis_df.empty or students_df.empty:
+        return pd.DataFrame()
+    outcome_columns = [
+        "anon_id",
+        "timestamp",
+        "k_est",
+        "k_stage",
+        "k_level",
+        "k_coherence_std",
+        "fw_dom",
+        "choice_level_mode",
+        "choice_fw_mode",
+        "n_dilemmas",
+    ] + [column for column in students_df.columns if column.startswith("fw_")]
+    available_outcomes = [column for column in dict.fromkeys(outcome_columns) if column in students_df.columns]
+    if not {"anon_id", "timestamp"}.issubset(available_outcomes):
+        return pd.DataFrame()
+    students_outcomes = students_df[available_outcomes].drop_duplicates(subset=["anon_id", "timestamp"]).copy()
+    merged = analysis_df.merge(students_outcomes, on=["anon_id", "timestamp"], how="inner")
+    if merged.empty:
+        return merged
+    merged["attempt_scope"] = "ultimo_intento_filtrado"
+    if "fw_dom" in merged.columns:
+        merged["fw_dom_label"] = merged["fw_dom"].map(framework_label)
+    if "choice_fw_mode" in merged.columns:
+        merged["choice_fw_mode_label"] = merged["choice_fw_mode"].map(framework_label)
+    preferred_columns = [
+        "attempt_scope",
+        "attempt_id",
+        "timestamp",
+        "created_at",
+        "anon_id",
+        "student_id",
+        "name",
+        "profession",
+        "group",
+        "gender",
+        "age",
+        "semester",
+        "works_for_studies",
+        "children_count",
+        "academic_program",
+        "academic_shift",
+        "prior_experience_area",
+        "ethics_training",
+        "work_hours_per_week",
+        "caregiving_load",
+        "study_funding_type",
+        "years_experience",
+        "n_dilemmas_answered",
+        "n_justifications",
+        "responded_item_ids",
+        "k_est",
+        "k_stage",
+        "k_level",
+        "k_coherence_std",
+        "fw_dom",
+        "fw_dom_label",
+        "choice_level_mode",
+        "choice_fw_mode",
+        "choice_fw_mode_label",
+        "n_dilemmas",
+    ]
+    preferred_columns.extend(
+        column for column in merged.columns if column.startswith("fw_") and column not in {"fw_dom", "fw_dom_label"}
+    )
+    ordered = [column for column in preferred_columns if column in merged.columns]
+    ordered.extend(column for column in merged.columns if column not in ordered)
+    return merged[ordered].copy()
 
 
 def build_rows(
@@ -2979,6 +3008,8 @@ def page_dashboard(df: pd.DataFrame) -> None:
         st.warning("Los filtros actuales no devuelven participantes. Ajusta la selección para continuar.")
         return
 
+    exploratory_model_df = build_exploratory_model_frame(load_attempt_analysis_frame(), students_filtered)
+
     st.caption(f"Mostrando {len(students_filtered)} de {len(students)} participantes consolidados.")
 
     ADMIN_REPORT_STORE.save_collective_snapshot(
@@ -3434,7 +3465,7 @@ def page_dashboard(df: pd.DataFrame) -> None:
             )
 
         st.markdown("#### Exportaciones y trazabilidad")
-        export_col1, export_col2 = st.columns([1, 1])
+        export_col1, export_col2, export_col3 = st.columns([1, 1, 1])
         students_export = students_filtered.drop(columns=["group_filter"], errors="ignore")
         df_last_export = df_last_filtered.drop(columns=["group_filter"], errors="ignore")
         export_col1.download_button(
@@ -3453,9 +3484,24 @@ def page_dashboard(df: pd.DataFrame) -> None:
             key="last_attempt_rows_filtered_csv",
             use_container_width=True,
         )
+        export_col3.download_button(
+            "Descargar base modelado (CSV)",
+            data=exploratory_model_df.to_csv(index=False).encode("utf-8") if not exploratory_model_df.empty else b"",
+            file_name="base_modelado_exploratorio.csv",
+            mime="text/csv",
+            key="exploratory_model_filtered_csv",
+            disabled=exploratory_model_df.empty,
+            use_container_width=True,
+        )
         st.info(
             f"Los archivos del análisis individual y colectivo también se guardan automáticamente en la carpeta administrativa del servidor: {ADMIN_REPORT_STORE.base_dir}."
         )
+        with st.expander("Vista previa de base para modelado exploratorio"):
+            if exploratory_model_df.empty:
+                st.info("No fue posible construir una base analítica filtrada con los intentos consolidados actuales.")
+            else:
+                st.caption("Base a nivel intento consolidado, alineada con resultados derivados como k_est, nivel moral y marco dominante.")
+                st.dataframe(exploratory_model_df, use_container_width=True)
 
     with tabs[5]:
         st.markdown(
@@ -3609,7 +3655,8 @@ def page_admin(df: pd.DataFrame) -> None:
 
     st.markdown("### Consultas persistentes y exportación")
     st.write("Consulta el backend consolidado sin depender del CSV legado y descarga tablas administrativas listas para revisión académica.")
-    attempt_summaries = PERSISTENCE_STORE.run_query("attempt_summaries", limit=5000)
+    admin_students, _ = student_table(df)
+    attempt_summaries = load_attempt_analysis_frame()
     if attempt_summaries.empty:
         st.info("Aún no hay intentos almacenados en el backend activo para consultas administrativas.")
     else:
@@ -3648,6 +3695,8 @@ def page_admin(df: pd.DataFrame) -> None:
         if audit_group != "Todas":
             audit_df = audit_df[audit_df["group"] == audit_group].copy()
 
+        audit_model_df = build_exploratory_model_frame(audit_df.drop(columns=["timestamp_dt"], errors="ignore"), admin_students)
+
         audit_metrics = st.columns(4)
         audit_metrics[0].metric("Intentos filtrados", str(len(audit_df)))
         audit_metrics[1].metric("Participantes únicos", str(audit_df["anon_id"].nunique()))
@@ -3679,7 +3728,7 @@ def page_admin(df: pd.DataFrame) -> None:
                 raw_rows_filtered = raw_rows_filtered[raw_rows_filtered["group"] == audit_group].copy()
             raw_rows_filtered = raw_rows_filtered.drop(columns=["timestamp_dt"], errors="ignore")
 
-            export_col1, export_col2 = st.columns([1, 1])
+            export_col1, export_col2, export_col3 = st.columns([1, 1, 1])
             export_col1.download_button(
                 "Descargar auditoría filtrada (CSV)",
                 data=audit_df.drop(columns=["timestamp_dt"], errors="ignore").to_csv(index=False).encode("utf-8"),
@@ -3692,6 +3741,7 @@ def page_admin(df: pd.DataFrame) -> None:
                 data=dataframe_to_excel_bytes({
                     "auditoria_intentos": audit_df.drop(columns=["timestamp_dt"], errors="ignore"),
                     "comparacion_profesion": audit_comparison_df,
+                    "base_modelado": audit_model_df,
                     "filas_respuestas": raw_rows_filtered,
                     "catalogo_lab": pd.DataFrame([
                         {
@@ -3709,13 +3759,23 @@ def page_admin(df: pd.DataFrame) -> None:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
+            export_col3.download_button(
+                "Descargar base modelado (CSV)",
+                data=audit_model_df.to_csv(index=False).encode("utf-8") if not audit_model_df.empty else b"",
+                file_name="base_modelado_auditoria.csv",
+                mime="text/csv",
+                disabled=audit_model_df.empty,
+                use_container_width=True,
+            )
 
         query_labels = {
             "attempt_summaries": "Resumen de intentos",
+            "analysis_frame": "Base de modelado exploratorio",
             "last_attempt": "Último intento por usuario",
             "user_history": "Histórico completo por usuario",
             "cohort_history": "Histórico por cohorte",
             "profession_comparison": "Comparación agregada por profesión",
+            "cohort_comparison": "Comparación agregada por cohorte",
         }
         selected_query = st.selectbox("Tipo de consulta", options=list(query_labels.keys()), format_func=lambda key: query_labels[key])
 
@@ -3732,6 +3792,18 @@ def page_admin(df: pd.DataFrame) -> None:
                 limit=limit,
             )
             export_name = "resumen_intentos"
+        elif selected_query == "analysis_frame":
+            selected_profession = st.selectbox("Filtrar profesión", options=["Todas"] + profession_options, key="analysis_frame_profession")
+            selected_group = st.selectbox("Filtrar cohorte", options=["Todas"] + group_options, key="analysis_frame_group")
+            limit = st.slider("Máximo de intentos analíticos a mostrar", min_value=20, max_value=1000, value=300, step=20, key="analysis_frame_limit")
+            analysis_query_df = PERSISTENCE_STORE.run_query(
+                "analysis_frame",
+                profession=None if selected_profession == "Todas" else selected_profession,
+                group_name=None if selected_group == "Todas" else selected_group,
+                limit=limit,
+            )
+            query_df = build_exploratory_model_frame(analysis_query_df, admin_students)
+            export_name = "base_modelado_exploratorio"
         elif selected_query == "last_attempt":
             selected_label = st.selectbox("Usuario", options=attempt_lookup["display_label"].tolist())
             selected_anon = attempt_lookup.loc[attempt_lookup["display_label"] == selected_label, "anon_id"].iloc[0]
@@ -3750,6 +3822,10 @@ def page_admin(df: pd.DataFrame) -> None:
             selected_professions = st.multiselect("Profesiones", options=profession_options, default=profession_options)
             query_df = PERSISTENCE_STORE.run_query("profession_comparison", professions=selected_professions or None)
             export_name = "comparacion_profesiones"
+        elif selected_query == "cohort_comparison":
+            selected_groups = st.multiselect("Cohortes", options=group_options, default=group_options)
+            query_df = PERSISTENCE_STORE.run_query("cohort_comparison", groups=selected_groups or None)
+            export_name = "comparacion_cohortes"
 
         if query_df.empty:
             st.info("La consulta seleccionada no devolvió resultados con los filtros actuales.")

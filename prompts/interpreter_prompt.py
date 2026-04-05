@@ -22,10 +22,12 @@ def build_interpreter_system_prompt() -> str:
         "La respuesta debe estar en español y en formato JSON estricto con estas claves exactas: "
         "resumen_ejecutivo, interpretacion_etica, interpretacion_legal, interpretacion_bioetica, riesgos, "
         "consideraciones_clave, fortalezas_argumentativas, debilidades_argumentativas, recomendaciones_formativas, "
-        "tabla_analitica_final. "
-        "Las claves riesgos, consideraciones_clave, fortalezas_argumentativas, debilidades_argumentativas y "
+        "tabla_analitica. "
+        "La clave riesgos debe ser una lista de objetos con las claves riesgo, descripcion, nivel. "
+        "Las claves consideraciones_clave, fortalezas_argumentativas, debilidades_argumentativas y "
         "recomendaciones_formativas deben ser listas de strings. "
-        "La clave tabla_analitica_final debe ser una lista de objetos con las claves dimension, hallazgo, implicacion, recomendacion. "
+        "La clave tabla_analitica debe ser una lista de objetos con las claves dimension, hallazgo_principal, "
+        "interpretacion, riesgo_asociado, nivel_atencion, recomendacion. "
         "No incluyas markdown, no incluyas texto fuera del JSON."
     )
 

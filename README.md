@@ -142,6 +142,51 @@ OPENAI_API_KEY = "tu-clave-openai"
 OPENAI_MODEL = "gpt-4.1-mini"
 ```
 
+## Salida JSON estructurada de Interpretación IA
+
+La sección Interpretación IA usa Structured Outputs de OpenAI para devolver una respuesta JSON estable y renderizable directamente en Streamlit.
+
+Estructura esperada:
+
+```json
+{
+    "resumen_ejecutivo": "",
+    "interpretacion_etica": "",
+    "interpretacion_legal": "",
+    "interpretacion_bioetica": "",
+    "riesgos": [
+        {
+            "riesgo": "",
+            "descripcion": "",
+            "nivel": ""
+        }
+    ],
+    "consideraciones_clave": [""],
+    "fortalezas_argumentativas": [""],
+    "debilidades_argumentativas": [""],
+    "recomendaciones_formativas": [""],
+    "tabla_analitica": [
+        {
+            "dimension": "",
+            "hallazgo_principal": "",
+            "interpretacion": "",
+            "riesgo_asociado": "",
+            "nivel_atencion": "",
+            "recomendacion": ""
+        }
+    ]
+}
+```
+
+Uso dentro de la app:
+
+- `resumen_ejecutivo`, `interpretacion_etica`, `interpretacion_legal` e `interpretacion_bioetica` se muestran como bloques narrativos.
+- `riesgos` se renderiza como tarjetas con nombre del riesgo, descripción y nivel.
+- `consideraciones_clave`, `fortalezas_argumentativas`, `debilidades_argumentativas` y `recomendaciones_formativas` se renderizan como listas.
+- `tabla_analitica` se renderiza como tabla final para lectura comparativa y exportación.
+
+El esquema estricto se define en [services/openai_interpreter.py](services/openai_interpreter.py) y el renderizado se implementa en [utils/render_interpretation.py](utils/render_interpretation.py).
+
 Para desarrollo local ya puedes usar el archivo:
 
 ```text

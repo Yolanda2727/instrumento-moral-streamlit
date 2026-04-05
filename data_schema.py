@@ -37,14 +37,15 @@ MIN_AGE = 16
 MAX_AGE = 85
 MAX_CHILDREN = 20
 MAX_WORK_HOURS = 80
+PREFER_NOT_TO_ANSWER = "Prefiere no responder"
 
-GENDER_OPTIONS = ["Mujer", "Hombre", "No binario", "Otro", "Prefiere no responder"]
-WORK_STUDY_OPTIONS = ["Sí", "No", "Parcialmente"]
+GENDER_OPTIONS = ["Mujer", "Hombre", "No binario", "Otro", PREFER_NOT_TO_ANSWER]
+WORK_STUDY_OPTIONS = ["Sí", "No", "Parcialmente", PREFER_NOT_TO_ANSWER]
 ACADEMIC_SHIFT_OPTIONS = ["", "Diurna", "Nocturna", "Mixta", "Fin de semana", "Otra"]
-PRIOR_EXPERIENCE_OPTIONS = ["", "Ninguna", "Laboral", "Clínica", "Laboral y clínica", "Otra"]
-ETHICS_TRAINING_OPTIONS = ["", "Ninguna", "Curso corto", "Asignatura formal", "Diplomado o posgrado", "Otra"]
-CAREGIVING_LOAD_OPTIONS = ["", "Ninguna", "Baja", "Moderada", "Alta", "Muy alta"]
-STUDY_FUNDING_OPTIONS = ["", "Recursos propios", "Apoyo familiar", "Beca", "Crédito", "Mixta", "Institucional", "Otra"]
+PRIOR_EXPERIENCE_OPTIONS = ["", "Ninguna", "Laboral", "Clínica", "Laboral y clínica", "Otra", PREFER_NOT_TO_ANSWER]
+ETHICS_TRAINING_OPTIONS = ["", "Ninguna", "Curso corto", "Asignatura formal", "Diplomado o posgrado", "Otra", PREFER_NOT_TO_ANSWER]
+CAREGIVING_LOAD_OPTIONS = ["", "Ninguna", "Baja", "Moderada", "Alta", "Muy alta", PREFER_NOT_TO_ANSWER]
+STUDY_FUNDING_OPTIONS = ["", "Recursos propios", "Apoyo familiar", "Beca", "Crédito", "Mixta", "Institucional", "Otra", PREFER_NOT_TO_ANSWER]
 
 SEMESTER_LIMITS_BY_PROFESSION = {
     "Medicina": 14,

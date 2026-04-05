@@ -854,16 +854,30 @@ def participant_context_from_row(row: pd.Series | Dict[str, Any]) -> Dict[str, A
     return {column: source.get(column) for column in PARTICIPANT_CONTEXT_COLUMNS}
 
 
-def build_context_display_rows(context: Dict[str, Any]) -> List[tuple[str, Any]]:
+def stringify_display_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (float, np.floating)):
+        if pd.isna(value):
+            return ""
+        if float(value).is_integer():
+            return str(int(value))
+        return f"{float(value):.2f}"
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    return str(value)
+
+
+def build_context_display_rows(context: Dict[str, Any]) -> List[tuple[str, str]]:
     rows = []
     for column in PARTICIPANT_CONTEXT_COLUMNS:
         value = context.get(column)
         if value is None or (isinstance(value, float) and pd.isna(value)):
             continue
-        rows.append((CONTEXT_FIELD_LABELS.get(column, column), value))
+        rows.append((CONTEXT_FIELD_LABELS.get(column, column), stringify_display_value(value)))
     years_experience = context.get("years_experience")
     if years_experience is not None and not (isinstance(years_experience, float) and pd.isna(years_experience)):
-        rows.append(("Años de experiencia", years_experience))
+        rows.append(("Años de experiencia", stringify_display_value(years_experience)))
     return rows
 
 
@@ -1171,13 +1185,16 @@ def build_rows(
     framework_payload: List[dict],
 ) -> pd.DataFrame:
     ts = now_iso()
-    anon_id = sha_id(student_id) if anonymize else student_id
+    id_seed = student_id or name or ts
+    anon_id = sha_id(id_seed) if anonymize else student_id
+    stored_student_id = "" if anonymize else student_id
+    stored_name = "" if anonymize else name
     rows = []
     common_fields = {
         "timestamp": ts,
         "anon_id": anon_id,
-        "student_id": student_id,
-        "name": name,
+        "student_id": stored_student_id,
+        "name": stored_name,
         "profession": profession,
         "years_experience": int(years_experience),
         "group": group,
@@ -2809,7 +2826,7 @@ def build_executive_kpi_table(students: pd.DataFrame, quantitative_report: Dict[
     top_level = students["k_level"].mode().iloc[0] if students["k_level"].notna().any() else "Sin predominio"
     profession_distribution = quantitative_report.get("profession_distribution", pd.DataFrame())
     top_profession = profession_distribution.iloc[0]["profession"] if not profession_distribution.empty else "Sin datos"
-    return pd.DataFrame([
+    table = pd.DataFrame([
         {"KPI": "Participantes consolidados", "Valor": int(len(students)), "Lectura": "Base efectiva del análisis colectivo"},
         {"KPI": "Profesiones representadas", "Valor": int(students["profession"].nunique()), "Lectura": "Diversidad disciplinar presente"},
         {"KPI": "Cohortes activas", "Valor": int(students["group"].fillna("Sin grupo").nunique()), "Lectura": "Número de grupos comparables"},
@@ -2819,6 +2836,8 @@ def build_executive_kpi_table(students: pd.DataFrame, quantitative_report: Dict[
         {"KPI": "Nivel moral más frecuente", "Valor": str(top_level).title(), "Lectura": "Tendencia descriptiva agregada"},
         {"KPI": "Profesión con mayor peso muestral", "Valor": str(top_profession), "Lectura": "Mayor aporte relativo a la muestra"},
     ])
+    table["Valor"] = table["Valor"].map(stringify_display_value)
+    return table
 
 
 def metrics_section(students: pd.DataFrame) -> None:
@@ -2914,7 +2933,19 @@ def page_apply(df: pd.DataFrame) -> None:
     with st.sidebar:
         st.markdown("### Parámetros de aplicación")
         route_size = st.slider("Número de dilemas por ruta", min_value=4, max_value=10, value=DEFAULT_ROUTE_SIZE, step=1)
-        anonymize = st.checkbox("Anonimizar identificador", value=True)
+        anonymize = st.checkbox("Anonimizar datos personales en el almacenamiento", value=True)
+
+    st.info(
+        "Este instrumento tiene fines formativos y de investigación educativa exploratoria. "
+        "No produce diagnósticos clínicos, psicológicos ni certificaciones sobre la persona participante."
+    )
+    with st.expander("Consentimiento informado y aviso de privacidad"):
+        st.markdown(
+            "- La participación es voluntaria y la información se usa con fines pedagógicos, de retroalimentación y análisis académico exploratorio.\n"
+            "- Puedes retirarte antes de enviar el formulario y elegir 'Prefiere no responder' en variables sensibles cuando esté disponible.\n"
+            "- Si mantienes activa la anonimización, la aplicación no almacenará tu nombre ni tu código en la base de datos; solo conservará un identificador seudonimizado para análisis agregados.\n"
+            "- Los resultados deben interpretarse con prudencia y no sustituyen evaluación profesional ni decisiones institucionales de alto impacto."
+        )
 
     st.markdown("### Configuración de la ruta profesional")
     route_col1, route_col2 = st.columns([2, 1])
@@ -2946,10 +2977,15 @@ def page_apply(df: pd.DataFrame) -> None:
         student_id = c1.text_input("ID institucional o código", max_chars=60)
         name = c2.text_input("Nombre o seudónimo", max_chars=120)
         group = c3.text_input("Grupo / cohorte / curso", max_chars=120)
+        informed_consent = st.checkbox(
+            "He leído la información anterior y autorizo el uso formativo y de investigación educativa exploratoria de mis respuestas.",
+            value=False,
+        )
 
         st.markdown("### Perfil sociodemográfico y académico")
         d1, d2, d3 = st.columns([1.1, 0.9, 0.9])
         gender = d1.selectbox("Género", options=[""] + GENDER_OPTIONS, key="apply_gender")
+        age_not_disclosed = d2.checkbox("Prefiere no responder", key="apply_age_not_disclosed")
         age = d2.number_input(
             "Edad",
             min_value=MIN_AGE,
@@ -2957,6 +2993,7 @@ def page_apply(df: pd.DataFrame) -> None:
             value=max(MIN_AGE, 18),
             step=1,
             key="apply_age",
+            disabled=age_not_disclosed,
         )
         semester = d3.number_input(
             f"Semestre (1 a {semester_max})",
@@ -2973,6 +3010,7 @@ def page_apply(df: pd.DataFrame) -> None:
             options=[""] + WORK_STUDY_OPTIONS,
             key="apply_work_study",
         )
+        children_not_disclosed = d5.checkbox("Prefiere no responder", key="apply_children_not_disclosed")
         children_count = d5.number_input(
             "Número de hijos",
             min_value=0,
@@ -2980,6 +3018,7 @@ def page_apply(df: pd.DataFrame) -> None:
             value=0,
             step=1,
             key="apply_children_count",
+            disabled=children_not_disclosed,
         )
 
         with st.expander("Variables contextuales opcionales"):
@@ -3082,19 +3121,23 @@ def page_apply(df: pd.DataFrame) -> None:
 
     if submitted:
         errors = []
+        age_value = None if age_not_disclosed else int(age)
+        children_count_value = None if children_not_disclosed else int(children_count)
         if not student_id.strip():
             errors.append("Debes diligenciar el ID institucional o código.")
         if not name.strip():
             errors.append("Debes diligenciar el nombre o seudónimo.")
+        if not informed_consent:
+            errors.append("Debes aceptar el consentimiento informado para continuar.")
         if not gender:
             errors.append("Debes seleccionar el género.")
         if not works_for_studies:
             errors.append("Debes indicar si trabajas para pagar tus estudios.")
-        if int(age) < MIN_AGE or int(age) > MAX_AGE:
+        if age_value is not None and (age_value < MIN_AGE or age_value > MAX_AGE):
             errors.append(f"La edad debe estar entre {MIN_AGE} y {MAX_AGE} años.")
         if int(semester) < 1 or int(semester) > semester_max:
             errors.append(f"El semestre para {profession} debe estar entre 1 y {semester_max}.")
-        if int(children_count) < 0 or int(children_count) > MAX_CHILDREN:
+        if children_count_value is not None and (children_count_value < 0 or children_count_value > MAX_CHILDREN):
             errors.append(f"El número de hijos debe estar entre 0 y {MAX_CHILDREN}.")
 
         try:
@@ -3110,10 +3153,10 @@ def page_apply(df: pd.DataFrame) -> None:
 
         participant_context = {
             "gender": gender,
-            "age": int(age),
+            "age": age_value,
             "semester": int(semester),
             "works_for_studies": works_for_studies,
-            "children_count": int(children_count),
+            "children_count": children_count_value,
             "academic_program": optional_text(academic_program),
             "academic_shift": optional_text(academic_shift),
             "prior_experience_area": optional_text(prior_experience_area),

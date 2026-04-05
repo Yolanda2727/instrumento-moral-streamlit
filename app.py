@@ -2351,6 +2351,86 @@ def make_feature_importance_bar(feature_df: pd.DataFrame, target: str) -> go.Fig
     return style_academic_figure(fig, f"Importancia exploratoria de variables para {analysis_label(target)}", height=520, showlegend=False)
 
 
+def make_semester_stage_violin(students: pd.DataFrame) -> go.Figure:
+    plot_df = students[["semester", "k_stage", "profession"]].copy()
+    plot_df["semester"] = pd.to_numeric(plot_df["semester"], errors="coerce")
+    plot_df["k_stage"] = pd.to_numeric(plot_df["k_stage"], errors="coerce")
+    plot_df = plot_df.dropna(subset=["semester", "k_stage"])
+    plot_df["semester_label"] = plot_df["semester"].astype(int).astype(str)
+    fig = px.violin(
+        plot_df,
+        x="semester_label",
+        y="k_stage",
+        color="semester_label",
+        box=True,
+        points="all",
+        title="Estadio moral estimado por semestre",
+        labels={"semester_label": "Semestre", "k_stage": "Estadio moral estimado"},
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+    )
+    fig.update_layout(showlegend=False)
+    return style_academic_figure(fig, "Estadio moral estimado por semestre", height=500, showlegend=False)
+
+
+def make_age_stage_scatter(students: pd.DataFrame) -> go.Figure:
+    plot_df = students[["age", "k_stage", "profession", "k_level", "fw_dom", "group"]].copy()
+    plot_df["age"] = pd.to_numeric(plot_df["age"], errors="coerce")
+    plot_df["k_stage"] = pd.to_numeric(plot_df["k_stage"], errors="coerce")
+    plot_df = plot_df.dropna(subset=["age", "k_stage"])
+    fig = px.scatter(
+        plot_df,
+        x="age",
+        y="k_stage",
+        color="profession",
+        symbol="k_level",
+        title="Edad vs estadio moral estimado",
+        labels={"age": "Edad", "k_stage": "Estadio moral estimado", "profession": "Profesión", "k_level": "Nivel moral"},
+        hover_data=["fw_dom", "group"],
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+    )
+    return style_academic_figure(fig, "Edad vs estadio moral estimado", height=500)
+
+
+def make_distribution_bar(series: pd.Series, title: str, x_label: str, color_label: str | None = None) -> go.Figure:
+    plot_df = series.fillna("No disponible").astype(str).value_counts(dropna=False).rename_axis("category").reset_index(name="n")
+    plot_df["pct"] = (plot_df["n"] / plot_df["n"].sum() * 100).round(1)
+    fig = px.bar(
+        plot_df,
+        x="category",
+        y="n",
+        color="category" if color_label is None else color_label,
+        text="n",
+        title=title,
+        labels={"category": x_label, "n": "Frecuencia"},
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+    )
+    fig.update_layout(showlegend=False)
+    fig.update_traces(textposition="outside")
+    return style_academic_figure(fig, title, height=420, showlegend=False)
+
+
+def make_effect_forest_plot(effect_df: pd.DataFrame) -> go.Figure:
+    plot_df = effect_df.copy()
+    plot_df = plot_df.dropna(subset=["effect_size"])
+    plot_df = plot_df.sort_values("effect_size", key=lambda s: s.abs(), ascending=True).tail(12)
+    plot_df["comparison_label"] = plot_df.apply(
+        lambda row: f"{analysis_label(row['outcome'])} | {analysis_label(row['group_variable'])}",
+        axis=1,
+    )
+    fig = px.scatter(
+        plot_df,
+        x="effect_size",
+        y="comparison_label",
+        color="p_value",
+        hover_data=["groups", "test", "effect_label"],
+        color_continuous_scale=["#0b1f3a", "#1c5f8d", "#9db9d3"],
+        title="Tamaño de efecto en asociaciones relevantes",
+        labels={"effect_size": "Tamaño de efecto", "comparison_label": "Comparación", "p_value": "p-valor"},
+    )
+    fig.add_vline(x=0, line_dash="dash", line_color="#8f3b3b")
+    return style_academic_figure(fig, "Tamaño de efecto en asociaciones relevantes", height=520)
+
+
 def make_profession_distribution_bar(profession_distribution: pd.DataFrame, profession_order: List[str]) -> go.Figure:
     plot_df = profession_distribution.copy()
     fig = px.bar(

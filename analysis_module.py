@@ -2,13 +2,21 @@ from __future__ import annotations
 
 from collections import Counter
 from itertools import combinations
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
+from sklearn.compose import ColumnTransformer
 from sklearn.cluster import KMeans
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.model_selection import KFold, StratifiedKFold, cross_validate
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
 ARGUMENT_PATTERN_LEXICONS = {
@@ -81,6 +89,581 @@ def hedges_g(a: Sequence[float] | np.ndarray, b: Sequence[float] | np.ndarray) -
     d = (arr_a.mean() - arr_b.mean()) / sp
     correction = 1 - (3 / (4 * (na + nb) - 9))
     return float(correction * d)
+
+
+def _safe_mode(series: pd.Series) -> Any:
+    mode = series.mode(dropna=True)
+    return mode.iloc[0] if not mode.empty else None
+
+
+def _is_approximately_normal(values: Sequence[float] | np.ndarray, alpha: float = 0.05) -> bool:
+    arr = np.array(values, dtype=float)
+    arr = arr[~np.isnan(arr)]
+    if len(arr) < 8:
+        return False
+    if np.ptp(arr) == 0:
+        return False
+    if len(arr) > 5000:
+        arr = np.random.choice(arr, size=5000, replace=False)
+    try:
+        _, p_value = stats.shapiro(arr)
+    except Exception:
+        return False
+    return bool(p_value > alpha)
+
+
+def _rank_biserial_from_u(u_stat: float, n_a: int, n_b: int) -> float:
+    if n_a <= 0 or n_b <= 0:
+        return np.nan
+    return float(1 - (2 * u_stat) / (n_a * n_b))
+
+
+def _eta_squared_from_f(f_stat: float, groups_n: int, total_n: int) -> float:
+    if total_n <= groups_n or pd.isna(f_stat):
+        return np.nan
+    numerator = f_stat * (groups_n - 1)
+    denominator = numerator + (total_n - groups_n)
+    return float(numerator / denominator) if denominator else np.nan
+
+
+def _epsilon_squared_from_h(h_stat: float, groups_n: int, total_n: int) -> float:
+    if total_n <= groups_n or pd.isna(h_stat):
+        return np.nan
+    return float((h_stat - groups_n + 1) / (total_n - groups_n))
+
+
+def _cramers_v(contingency: pd.DataFrame) -> float:
+    if contingency.empty:
+        return np.nan
+    chi2, _, _, _ = stats.chi2_contingency(contingency)
+    n = contingency.values.sum()
+    if n == 0:
+        return np.nan
+    r, k = contingency.shape
+    phi2 = chi2 / n
+    phi2corr = max(0, phi2 - ((k - 1) * (r - 1)) / max(n - 1, 1))
+    rcorr = r - ((r - 1) ** 2) / max(n - 1, 1)
+    kcorr = k - ((k - 1) ** 2) / max(n - 1, 1)
+    denom = min(kcorr - 1, rcorr - 1)
+    if denom <= 0:
+        return np.nan
+    return float(np.sqrt(phi2corr / denom))
+
+
+def _sanitize_feature_names(feature_names: Sequence[str]) -> list[str]:
+    return [str(name).replace("num__", "").replace("cat__", "") for name in feature_names]
+
+
+def build_argument_pattern_profiles(df_last: pd.DataFrame, stopwords: Sequence[str]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    choices = df_last[df_last["row_type"] == "choice"].copy()
+    if choices.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty
+    choices["clean"] = clean_text_series(choices["text"], stopwords)
+    pattern_rows = []
+    for _, row in choices.iterrows():
+        tokens = set(token for token in str(row["clean"]).split() if len(token) > 2)
+        scores = {pattern: len(tokens & lexicon) for pattern, lexicon in ARGUMENT_PATTERN_LEXICONS.items()}
+        dominant_pattern = max(scores, key=scores.get) if any(scores.values()) else "indeterminado"
+        pattern_rows.append({
+            "anon_id": row["anon_id"],
+            "profession": row.get("profession"),
+            "group": row.get("group"),
+            "item_id": row.get("item_id"),
+            "argument_pattern": dominant_pattern,
+        })
+    pattern_df = pd.DataFrame(pattern_rows)
+    if pattern_df.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty
+    participant_summary = pattern_df.groupby("anon_id").agg(
+        profession=("profession", "first"),
+        group=("group", "first"),
+        argument_pattern_dom=("argument_pattern", _safe_mode),
+        argument_pattern_diversity=("argument_pattern", "nunique"),
+        n_argument_rows=("argument_pattern", "size"),
+    ).reset_index()
+    profession_summary = pattern_df.groupby(["profession", "argument_pattern"]).size().reset_index(name="n")
+    profession_summary["pct_profession"] = profession_summary.groupby("profession")["n"].transform(
+        lambda s: (s / s.sum() * 100).round(2)
+    )
+    return pattern_df, participant_summary, profession_summary.sort_values(["profession", "n"], ascending=[True, False])
+
+
+def build_frequency_tables(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    rows = []
+    for column in columns:
+        if column not in df.columns:
+            continue
+        subset = df[column].copy()
+        if subset.dropna().empty:
+            continue
+        freq = subset.fillna("No disponible").astype(str).value_counts(dropna=False).rename_axis("category").reset_index(name="n")
+        freq["pct"] = (freq["n"] / freq["n"].sum() * 100).round(2)
+        freq["variable"] = column
+        rows.append(freq[["variable", "category", "n", "pct"]])
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["variable", "category", "n", "pct"])
+
+
+def build_numeric_descriptives(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    rows = []
+    for column in columns:
+        if column not in df.columns:
+            continue
+        values = pd.to_numeric(df[column], errors="coerce").dropna().values
+        if len(values) == 0:
+            continue
+        rows.append({
+            "variable": column,
+            "n": int(len(values)),
+            "mean": float(np.mean(values)),
+            "median": float(np.median(values)),
+            "sd": float(np.std(values, ddof=1)) if len(values) > 1 else np.nan,
+            "p25": float(np.percentile(values, 25)),
+            "p75": float(np.percentile(values, 75)),
+            "min": float(np.min(values)),
+            "max": float(np.max(values)),
+        })
+    return pd.DataFrame(rows)
+
+
+def build_correlation_analysis(
+    df: pd.DataFrame,
+    predictors: Sequence[str],
+    outcomes: Sequence[str],
+    ordinal_predictors: Sequence[str] | None = None,
+    ordinal_outcomes: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    ordinal_predictors = set(ordinal_predictors or [])
+    ordinal_outcomes = set(ordinal_outcomes or [])
+    rows = []
+    for predictor in predictors:
+        if predictor not in df.columns:
+            continue
+        for outcome in outcomes:
+            if outcome not in df.columns:
+                continue
+            subset = df[[predictor, outcome]].copy()
+            subset[predictor] = pd.to_numeric(subset[predictor], errors="coerce")
+            subset[outcome] = pd.to_numeric(subset[outcome], errors="coerce")
+            subset = subset.dropna()
+            if len(subset) < 5 or subset[predictor].nunique() < 2 or subset[outcome].nunique() < 2:
+                continue
+            use_spearman = (
+                predictor in ordinal_predictors
+                or outcome in ordinal_outcomes
+                or not _is_approximately_normal(subset[predictor].values)
+                or not _is_approximately_normal(subset[outcome].values)
+            )
+            if use_spearman:
+                statistic, p_value = stats.spearmanr(subset[predictor].values, subset[outcome].values)
+                method = "Spearman"
+            else:
+                statistic, p_value = stats.pearsonr(subset[predictor].values, subset[outcome].values)
+                method = "Pearson"
+            rows.append({
+                "predictor": predictor,
+                "outcome": outcome,
+                "method": method,
+                "n": int(len(subset)),
+                "statistic": float(statistic) if pd.notna(statistic) else np.nan,
+                "p_value": float(p_value) if pd.notna(p_value) else np.nan,
+            })
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result = result.sort_values(["p_value", "predictor", "outcome"], na_position="last")
+    return result
+
+
+def build_group_comparison_analysis(
+    df: pd.DataFrame,
+    group_columns: Sequence[str],
+    outcome_columns: Sequence[str],
+    ordinal_outcomes: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    ordinal_outcomes = set(ordinal_outcomes or [])
+    rows = []
+    for group_column in group_columns:
+        if group_column not in df.columns:
+            continue
+        for outcome_column in outcome_columns:
+            if outcome_column not in df.columns:
+                continue
+            subset = df[[group_column, outcome_column]].copy()
+            subset[outcome_column] = pd.to_numeric(subset[outcome_column], errors="coerce")
+            subset = subset.dropna()
+            if subset.empty or subset[outcome_column].nunique() < 2:
+                continue
+            grouped = [(name, values[outcome_column].values.astype(float)) for name, values in subset.groupby(group_column) if len(values) >= 2]
+            if len(grouped) < 2:
+                continue
+            group_names = [name for name, _ in grouped]
+            grouped_values = [values for _, values in grouped]
+            normality_ok = all(_is_approximately_normal(values) for values in grouped_values)
+            if len(grouped_values) == 2:
+                a, b = grouped_values
+                if outcome_column not in ordinal_outcomes and normality_ok:
+                    _, levene_p = stats.levene(a, b)
+                    statistic, p_value = stats.ttest_ind(a, b, equal_var=bool(levene_p > 0.05))
+                    effect_size = hedges_g(a, b)
+                    test_name = "t-test"
+                    effect_label = "Hedges g"
+                else:
+                    statistic, p_value = stats.mannwhitneyu(a, b, alternative="two-sided")
+                    effect_size = _rank_biserial_from_u(statistic, len(a), len(b))
+                    test_name = "Mann-Whitney U"
+                    effect_label = "rango-biserial"
+                rows.append({
+                    "group_variable": group_column,
+                    "outcome": outcome_column,
+                    "groups": f"{group_names[0]} vs {group_names[1]}",
+                    "test": test_name,
+                    "n": int(len(a) + len(b)),
+                    "statistic": float(statistic),
+                    "p_value": float(p_value),
+                    "effect_size": effect_size,
+                    "effect_label": effect_label,
+                })
+                continue
+            if outcome_column not in ordinal_outcomes and normality_ok:
+                statistic, p_value = stats.f_oneway(*grouped_values)
+                effect_size = _eta_squared_from_f(statistic, len(grouped_values), sum(len(values) for values in grouped_values))
+                test_name = "ANOVA"
+                effect_label = "eta^2"
+            else:
+                statistic, p_value = stats.kruskal(*grouped_values)
+                effect_size = _epsilon_squared_from_h(statistic, len(grouped_values), sum(len(values) for values in grouped_values))
+                test_name = "Kruskal-Wallis"
+                effect_label = "epsilon^2"
+            rows.append({
+                "group_variable": group_column,
+                "outcome": outcome_column,
+                "groups": ", ".join(map(str, group_names)),
+                "test": test_name,
+                "n": int(sum(len(values) for values in grouped_values)),
+                "statistic": float(statistic),
+                "p_value": float(p_value),
+                "effect_size": effect_size,
+                "effect_label": effect_label,
+            })
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result = result.sort_values(["p_value", "group_variable", "outcome"], na_position="last")
+    return result
+
+
+def build_categorical_association_analysis(
+    df: pd.DataFrame,
+    predictor_columns: Sequence[str],
+    outcome_columns: Sequence[str],
+) -> pd.DataFrame:
+    rows = []
+    for predictor in predictor_columns:
+        if predictor not in df.columns:
+            continue
+        for outcome in outcome_columns:
+            if outcome not in df.columns:
+                continue
+            subset = df[[predictor, outcome]].dropna().copy()
+            if subset.empty:
+                continue
+            contingency = pd.crosstab(subset[predictor], subset[outcome])
+            if contingency.shape[0] < 2 or contingency.shape[1] < 2:
+                continue
+            chi2, p_value, degrees, expected = stats.chi2_contingency(contingency)
+            rows.append({
+                "predictor": predictor,
+                "outcome": outcome,
+                "n": int(contingency.values.sum()),
+                "degrees_freedom": int(degrees),
+                "chi2": float(chi2),
+                "p_value": float(p_value),
+                "cramers_v": _cramers_v(contingency),
+                "min_expected": float(np.min(expected)),
+                "pct_expected_lt5": float((expected < 5).mean() * 100),
+            })
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result = result.sort_values(["p_value", "predictor", "outcome"], na_position="last")
+    return result
+
+
+def build_predictive_models(
+    df: pd.DataFrame,
+    feature_columns: Sequence[str],
+    classification_targets: Sequence[str],
+    regression_targets: Sequence[str],
+    random_seed: int = 42,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    usable_features = [column for column in feature_columns if column in df.columns and df[column].notna().any()]
+    if not usable_features:
+        empty = pd.DataFrame()
+        return empty, empty
+
+    numeric_features = [column for column in usable_features if pd.api.types.is_numeric_dtype(df[column])]
+    categorical_features = [column for column in usable_features if column not in numeric_features]
+    preprocessor = ColumnTransformer(
+        transformers=[
+            (
+                "num",
+                Pipeline([
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                ]),
+                numeric_features,
+            ),
+            (
+                "cat",
+                Pipeline([
+                    ("imputer", SimpleImputer(strategy="most_frequent")),
+                    ("onehot", OneHotEncoder(handle_unknown="ignore")),
+                ]),
+                categorical_features,
+            ),
+        ],
+        remainder="drop",
+    )
+
+    score_rows = []
+    importance_rows = []
+
+    for target in classification_targets:
+        if target not in df.columns:
+            continue
+        subset = df[usable_features + [target]].dropna(subset=[target]).copy()
+        if len(subset) < 20 or subset[target].nunique() < 2:
+            continue
+        class_counts = subset[target].astype(str).value_counts()
+        min_class_n = int(class_counts.min()) if not class_counts.empty else 0
+        if min_class_n < 2:
+            continue
+        cv = StratifiedKFold(n_splits=min(5, min_class_n), shuffle=True, random_state=random_seed)
+        models = {
+            "logistic_regression": LogisticRegression(max_iter=1000, class_weight="balanced"),
+            "random_forest": RandomForestClassifier(n_estimators=300, random_state=random_seed, class_weight="balanced"),
+        }
+        X = subset[usable_features]
+        y = subset[target].astype(str)
+        for model_name, estimator in models.items():
+            pipeline = Pipeline([("preprocessor", preprocessor), ("model", estimator)])
+            scores = cross_validate(
+                pipeline,
+                X,
+                y,
+                cv=cv,
+                scoring={"balanced_accuracy": "balanced_accuracy", "f1_macro": "f1_macro"},
+            )
+            score_rows.append({
+                "target": target,
+                "task": "classification",
+                "model": model_name,
+                "n": int(len(subset)),
+                "classes": int(y.nunique()),
+                "metric": "balanced_accuracy",
+                "mean_score": float(np.mean(scores["test_balanced_accuracy"])),
+                "sd_score": float(np.std(scores["test_balanced_accuracy"])),
+            })
+            score_rows.append({
+                "target": target,
+                "task": "classification",
+                "model": model_name,
+                "n": int(len(subset)),
+                "classes": int(y.nunique()),
+                "metric": "f1_macro",
+                "mean_score": float(np.mean(scores["test_f1_macro"])),
+                "sd_score": float(np.std(scores["test_f1_macro"])),
+            })
+            if model_name != "random_forest":
+                continue
+            fitted = pipeline.fit(X, y)
+            feature_names = _sanitize_feature_names(fitted.named_steps["preprocessor"].get_feature_names_out())
+            importances = fitted.named_steps["model"].feature_importances_
+            top_indices = np.argsort(importances)[::-1][:20]
+            for index in top_indices:
+                importance_rows.append({
+                    "target": target,
+                    "task": "classification",
+                    "model": model_name,
+                    "feature": feature_names[index],
+                    "importance": float(importances[index]),
+                })
+
+    for target in regression_targets:
+        if target not in df.columns:
+            continue
+        subset = df[usable_features + [target]].copy()
+        subset[target] = pd.to_numeric(subset[target], errors="coerce")
+        subset = subset.dropna(subset=[target])
+        if len(subset) < 25:
+            continue
+        cv = KFold(n_splits=min(5, len(subset)), shuffle=True, random_state=random_seed)
+        models = {
+            "linear_regression": LinearRegression(),
+            "random_forest_regressor": RandomForestRegressor(n_estimators=300, random_state=random_seed),
+        }
+        X = subset[usable_features]
+        y = subset[target].astype(float)
+        for model_name, estimator in models.items():
+            pipeline = Pipeline([("preprocessor", preprocessor), ("model", estimator)])
+            scores = cross_validate(
+                pipeline,
+                X,
+                y,
+                cv=cv,
+                scoring={"r2": "r2", "neg_mae": "neg_mean_absolute_error"},
+            )
+            score_rows.append({
+                "target": target,
+                "task": "regression",
+                "model": model_name,
+                "n": int(len(subset)),
+                "classes": np.nan,
+                "metric": "r2",
+                "mean_score": float(np.mean(scores["test_r2"])),
+                "sd_score": float(np.std(scores["test_r2"])),
+            })
+            score_rows.append({
+                "target": target,
+                "task": "regression",
+                "model": model_name,
+                "n": int(len(subset)),
+                "classes": np.nan,
+                "metric": "mae",
+                "mean_score": float(-np.mean(scores["test_neg_mae"])),
+                "sd_score": float(np.std(-scores["test_neg_mae"])),
+            })
+            if model_name != "random_forest_regressor":
+                continue
+            fitted = pipeline.fit(X, y)
+            feature_names = _sanitize_feature_names(fitted.named_steps["preprocessor"].get_feature_names_out())
+            importances = fitted.named_steps["model"].feature_importances_
+            top_indices = np.argsort(importances)[::-1][:20]
+            for index in top_indices:
+                importance_rows.append({
+                    "target": target,
+                    "task": "regression",
+                    "model": model_name,
+                    "feature": feature_names[index],
+                    "importance": float(importances[index]),
+                })
+
+    return pd.DataFrame(score_rows), pd.DataFrame(importance_rows)
+
+
+def build_statistical_association_report(
+    students: pd.DataFrame,
+    df_last: pd.DataFrame,
+    stopwords: Sequence[str],
+) -> Dict[str, pd.DataFrame]:
+    empty = pd.DataFrame()
+    if students.empty:
+        return {
+            "analysis_frame": empty,
+            "sample_overview": empty,
+            "independent_frequencies": empty,
+            "outcome_frequencies": empty,
+            "numeric_descriptives": empty,
+            "correlations": empty,
+            "group_comparisons": empty,
+            "categorical_associations": empty,
+            "predictive_models": empty,
+            "feature_importance": empty,
+            "methodological_notes": empty,
+        }
+
+    analysis_df = students.copy()
+    _, participant_patterns, _ = build_argument_pattern_profiles(df_last, stopwords)
+    if not participant_patterns.empty:
+        analysis_df = analysis_df.merge(
+            participant_patterns[["anon_id", "argument_pattern_dom", "argument_pattern_diversity"]],
+            on="anon_id",
+            how="left",
+        )
+
+    independent_numeric = [
+        column for column in ["age", "semester", "children_count", "work_hours_per_week", "years_experience"]
+        if column in analysis_df.columns
+    ]
+    independent_categorical = [
+        column for column in [
+            "gender",
+            "works_for_studies",
+            "profession",
+            "academic_program",
+            "academic_shift",
+            "prior_experience_area",
+            "ethics_training",
+            "caregiving_load",
+            "study_funding_type",
+            "group",
+        ]
+        if column in analysis_df.columns
+    ]
+    numeric_outcomes = [
+        column for column in ["k_est", "k_stage", "k_coherence_std", "argument_pattern_diversity"]
+        if column in analysis_df.columns
+    ]
+    numeric_outcomes.extend(column for column in analysis_df.columns if column.startswith("fw_") and column != "fw_dom")
+    categorical_outcomes = [
+        column for column in ["k_level", "fw_dom", "argument_pattern_dom"]
+        if column in analysis_df.columns
+    ]
+
+    sample_overview = pd.DataFrame([
+        {"metric": "participantes", "value": int(len(analysis_df))},
+        {"metric": "profesiones", "value": int(analysis_df["profession"].dropna().nunique()) if "profession" in analysis_df.columns else 0},
+        {"metric": "cohortes", "value": int(analysis_df["group"].dropna().nunique()) if "group" in analysis_df.columns else 0},
+        {"metric": "variables_independientes_categoricas", "value": int(len(independent_categorical))},
+        {"metric": "variables_independientes_numericas", "value": int(len(independent_numeric))},
+        {"metric": "resultados_numericos", "value": int(len(numeric_outcomes))},
+        {"metric": "resultados_categoricos", "value": int(len(categorical_outcomes))},
+    ])
+
+    correlations = build_correlation_analysis(
+        analysis_df,
+        predictors=independent_numeric,
+        outcomes=numeric_outcomes,
+        ordinal_predictors=["semester", "children_count"],
+        ordinal_outcomes=["k_stage", "argument_pattern_diversity"],
+    )
+    group_comparisons = build_group_comparison_analysis(
+        analysis_df,
+        group_columns=independent_categorical,
+        outcome_columns=numeric_outcomes,
+        ordinal_outcomes=["k_stage", "argument_pattern_diversity"],
+    )
+    categorical_associations = build_categorical_association_analysis(
+        analysis_df,
+        predictor_columns=independent_categorical,
+        outcome_columns=categorical_outcomes,
+    )
+    predictive_models, feature_importance = build_predictive_models(
+        analysis_df,
+        feature_columns=independent_numeric + independent_categorical,
+        classification_targets=[column for column in ["k_level", "fw_dom", "argument_pattern_dom"] if column in analysis_df.columns],
+        regression_targets=[column for column in ["k_est"] if column in analysis_df.columns],
+    )
+    methodological_notes = pd.DataFrame([
+        {"tema": "Interpretación", "nota": "Los resultados deben leerse como asociaciones, correlaciones o capacidad predictiva exploratoria; no implican causalidad."},
+        {"tema": "Selección de prueba", "nota": "Spearman se prioriza para variables ordinales o distribuciones no normales; Pearson solo se usa cuando la forma de los datos lo permite."},
+        {"tema": "Comparaciones entre grupos", "nota": "Se usan pruebas no paramétricas cuando la normalidad no se sostiene o cuando el resultado es ordinal; ANOVA y t-test quedan restringidos a supuestos compatibles."},
+        {"tema": "Modelos predictivos", "nota": "Los modelos multivariables y de bosque aleatorio funcionan como apoyo exploratorio para priorizar hipótesis analíticas, no como diagnóstico individual."},
+        {"tema": "Muestra", "nota": "P-valores, tamaños de efecto y métricas predictivas dependen del tamaño muestral, del desbalance entre clases y de la calidad de los registros disponibles."},
+    ])
+
+    return {
+        "analysis_frame": analysis_df,
+        "sample_overview": sample_overview,
+        "independent_frequencies": build_frequency_tables(analysis_df, independent_categorical),
+        "outcome_frequencies": build_frequency_tables(analysis_df, categorical_outcomes),
+        "numeric_descriptives": build_numeric_descriptives(analysis_df, independent_numeric + numeric_outcomes),
+        "correlations": correlations,
+        "group_comparisons": group_comparisons,
+        "categorical_associations": categorical_associations,
+        "predictive_models": predictive_models,
+        "feature_importance": feature_importance,
+        "methodological_notes": methodological_notes,
+    }
 
 
 def build_quantitative_report(students: pd.DataFrame, df_last: pd.DataFrame, frameworks: Sequence[str]) -> Dict[str, pd.DataFrame]:
@@ -306,25 +889,8 @@ def cluster_thematic_justifications(
 
 
 def argumentative_pattern_table(df_last: pd.DataFrame, stopwords: Sequence[str]) -> pd.DataFrame:
-    choices = df_last[df_last["row_type"] == "choice"].copy()
-    if choices.empty:
-        return pd.DataFrame()
-    choices["clean"] = clean_text_series(choices["text"], stopwords)
-    pattern_rows = []
-    for _, row in choices.iterrows():
-        tokens = set(token for token in row["clean"].split() if len(token) > 2)
-        scores = {pattern: len(tokens & lexicon) for pattern, lexicon in ARGUMENT_PATTERN_LEXICONS.items()}
-        dominant_pattern = max(scores, key=scores.get) if any(scores.values()) else "indeterminado"
-        pattern_rows.append({
-            "anon_id": row["anon_id"],
-            "profession": row["profession"],
-            "item_id": row["item_id"],
-            "argument_pattern": dominant_pattern,
-        })
-    pattern_df = pd.DataFrame(pattern_rows)
-    summary = pattern_df.groupby(["profession", "argument_pattern"]).size().reset_index(name="n")
-    summary["pct_profession"] = summary.groupby("profession")["n"].transform(lambda s: (s / s.sum() * 100).round(2))
-    return summary.sort_values(["profession", "n"], ascending=[True, False])
+    _, _, summary = build_argument_pattern_profiles(df_last, stopwords)
+    return summary
 
 
 def internal_consistency_estimate(df_last: pd.DataFrame) -> pd.DataFrame:

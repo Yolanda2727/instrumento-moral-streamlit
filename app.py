@@ -21,6 +21,7 @@ from analysis_module import (
     argumentative_pattern_table,
     automatic_interpretive_synthesis,
     build_quantitative_report,
+    build_statistical_association_report,
     clean_text_series,
     cluster_thematic_justifications,
     extract_keywords_by_group,
@@ -738,6 +739,12 @@ def load_df() -> pd.DataFrame:
 
 def load_attempt_analysis_frame() -> pd.DataFrame:
     return load_attempt_analysis_cached(PERSISTENCE_STORE.backend_detail)
+
+
+@st.cache_data(show_spinner=False)
+def build_statistical_report_cached(cache_key: str, students_df: pd.DataFrame, df_last_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    del cache_key
+    return build_statistical_association_report(students_df, df_last_df, BASE_STOPWORDS)
 
 
 def save_attempt_rows(df: pd.DataFrame) -> None:
@@ -2246,6 +2253,104 @@ def render_plotly_figure(fig: go.Figure, export_name: str, data_df: pd.DataFrame
         st.caption(caption)
 
 
+def analysis_label(column: str) -> str:
+    custom_labels = {
+        "profession": "Profesión",
+        "group": "Cohorte",
+        "k_est": "Índice k_est",
+        "k_stage": "Estadio moral estimado",
+        "k_level": "Nivel moral dominante",
+        "fw_dom": "Marco ético dominante",
+        "k_coherence_std": "Coherencia argumentativa",
+        "argument_pattern_dom": "Patrón cualitativo dominante",
+        "argument_pattern_diversity": "Diversidad de patrones cualitativos",
+    }
+    if column in custom_labels:
+        return custom_labels[column]
+    if column in CONTEXT_FIELD_LABELS:
+        return CONTEXT_FIELD_LABELS[column]
+    if column.startswith("fw_") and column != "fw_dom":
+        return f"Puntaje {framework_label(column.replace('fw_', '', 1))}"
+    return str(column)
+
+
+def feature_label(feature_name: str) -> str:
+    base, separator, remainder = str(feature_name).partition("_")
+    if separator and base in CONTEXT_FIELD_LABELS | {"profession": "Profesión", "group": "Cohorte"}:
+        base_label = analysis_label(base)
+        return f"{base_label}: {remainder}"
+    return analysis_label(str(feature_name))
+
+
+def make_statistical_heatmap(stats_df: pd.DataFrame, x_col: str, y_col: str, value_col: str, title: str, colorbar_title: str) -> go.Figure:
+    plot_df = stats_df.copy()
+    if plot_df.empty:
+        return go.Figure()
+    pivot = plot_df.pivot_table(index=y_col, columns=x_col, values=value_col, aggfunc="first")
+    pivot = pivot.rename(index=analysis_label, columns=analysis_label)
+    fig = px.imshow(
+        pivot,
+        text_auto=".2f",
+        color_continuous_scale=["#f3f7fb", "#9db9d3", "#1c5f8d", "#0b1f3a"],
+        aspect="auto",
+        title=title,
+    )
+    fig.update_layout(coloraxis_colorbar_title=colorbar_title)
+    return style_academic_figure(fig, title, height=520)
+
+
+def make_group_comparison_boxplot(analysis_df: pd.DataFrame, group_column: str, outcome_column: str) -> go.Figure:
+    plot_df = analysis_df[[group_column, outcome_column]].copy()
+    plot_df[outcome_column] = pd.to_numeric(plot_df[outcome_column], errors="coerce")
+    plot_df = plot_df.dropna()
+    fig = px.box(
+        plot_df,
+        x=group_column,
+        y=outcome_column,
+        color=group_column,
+        points="all",
+        title=f"{analysis_label(outcome_column)} según {analysis_label(group_column)}",
+        labels={group_column: analysis_label(group_column), outcome_column: analysis_label(outcome_column)},
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+    )
+    fig.update_layout(showlegend=False)
+    return style_academic_figure(fig, f"{analysis_label(outcome_column)} según {analysis_label(group_column)}", height=500, showlegend=False)
+
+
+def make_categorical_association_chart(analysis_df: pd.DataFrame, predictor: str, outcome: str) -> go.Figure:
+    plot_df = analysis_df[[predictor, outcome]].dropna().copy()
+    composition = pd.crosstab(plot_df[predictor], plot_df[outcome], normalize="index") * 100
+    composition = composition.reset_index().melt(id_vars=predictor, var_name=outcome, value_name="pct")
+    fig = px.bar(
+        composition,
+        x=predictor,
+        y="pct",
+        color=outcome,
+        barmode="stack",
+        title=f"{analysis_label(outcome)} por {analysis_label(predictor)}",
+        labels={predictor: analysis_label(predictor), "pct": "Porcentaje (%)", outcome: analysis_label(outcome)},
+        color_discrete_sequence=ACADEMIC_COLOR_SEQUENCE,
+    )
+    return style_academic_figure(fig, f"{analysis_label(outcome)} por {analysis_label(predictor)}", height=500)
+
+
+def make_feature_importance_bar(feature_df: pd.DataFrame, target: str) -> go.Figure:
+    plot_df = feature_df[feature_df["target"] == target].copy().sort_values("importance", ascending=True).tail(15)
+    plot_df["feature_label"] = plot_df["feature"].apply(feature_label)
+    fig = px.bar(
+        plot_df,
+        x="importance",
+        y="feature_label",
+        orientation="h",
+        color="importance",
+        color_continuous_scale=["#9db9d3", "#1c5f8d", "#0b1f3a"],
+        title=f"Importancia exploratoria de variables para {analysis_label(target)}",
+        labels={"importance": "Importancia", "feature_label": "Variable"},
+    )
+    fig.update_layout(showlegend=False, coloraxis_showscale=False)
+    return style_academic_figure(fig, f"Importancia exploratoria de variables para {analysis_label(target)}", height=520, showlegend=False)
+
+
 def make_profession_distribution_bar(profession_distribution: pd.DataFrame, profession_order: List[str]) -> go.Figure:
     plot_df = profession_distribution.copy()
     fig = px.bar(
@@ -3008,7 +3113,10 @@ def page_dashboard(df: pd.DataFrame) -> None:
         st.warning("Los filtros actuales no devuelven participantes. Ajusta la selección para continuar.")
         return
 
+    students_filtered_base = students_filtered.drop(columns=["group_filter"], errors="ignore")
+    df_last_filtered_base = df_last_filtered.drop(columns=["group_filter"], errors="ignore")
     exploratory_model_df = build_exploratory_model_frame(load_attempt_analysis_frame(), students_filtered)
+    statistical_report = build_statistical_report_cached(PERSISTENCE_STORE.backend_detail, students_filtered_base, df_last_filtered_base)
 
     st.caption(f"Mostrando {len(students_filtered)} de {len(students)} participantes consolidados.")
 
@@ -3018,26 +3126,26 @@ def page_dashboard(df: pd.DataFrame) -> None:
         snapshot_name="latest_global",
     )
     ADMIN_REPORT_STORE.save_collective_snapshot(
-        students_df=students_filtered.drop(columns=["group_filter"], errors="ignore"),
-        last_attempt_df=df_last_filtered.drop(columns=["group_filter"], errors="ignore"),
+        students_df=students_filtered_base,
+        last_attempt_df=df_last_filtered_base,
         snapshot_name="latest_filtered",
     )
 
     quantitative_report = build_quantitative_report(
-        students_filtered.drop(columns=["group_filter"], errors="ignore"),
-        df_last_filtered.drop(columns=["group_filter"], errors="ignore"),
+        students_filtered_base,
+        df_last_filtered_base,
         FRAMEWORKS,
     )
     keyword_df = extract_keywords_by_group(df_last_filtered, BASE_STOPWORDS, group_col="profession")
     cluster_summary, cluster_distribution = cluster_thematic_justifications(df_last_filtered, BASE_STOPWORDS, RANDOM_SEED)
     pattern_summary = argumentative_pattern_table(df_last_filtered, BASE_STOPWORDS)
     trends_df = profession_interpretive_trends(
-        students_filtered.drop(columns=["group_filter"], errors="ignore"),
+        students_filtered_base,
         keyword_df,
         pattern_summary,
     )
     collective_synthesis = automatic_interpretive_synthesis(
-        students_filtered.drop(columns=["group_filter"], errors="ignore"),
+        students_filtered_base,
         quantitative_report,
         trends_df,
         cluster_summary,
@@ -3068,6 +3176,7 @@ def page_dashboard(df: pd.DataFrame) -> None:
         "4. Análisis cualitativo",
         "5. Interpretación integrada",
         "6. Contexto ampliado",
+        "7. Estadística asociativa",
     ])
 
     with tabs[0]:
@@ -3590,6 +3699,192 @@ def page_dashboard(df: pd.DataFrame) -> None:
                 st.caption(
                     f"Correlación descriptiva con k_est: {correlation:.2f}" if pd.notna(correlation) else "No hay suficientes casos para estimar una correlación descriptiva estable."
                 )
+
+    with tabs[6]:
+        st.markdown(
+            """
+            <div class="section-card">
+                <h3>Estadística asociativa y modelado exploratorio</h3>
+                <p>Integra descriptivos, frecuencias, contrastes entre grupos, correlaciones, asociaciones entre categóricas y modelos multivariables exploratorios con una lectura prudente y académica.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        stats_analysis_df = statistical_report.get("analysis_frame", pd.DataFrame())
+        stats_overview_df = statistical_report.get("sample_overview", pd.DataFrame())
+        stats_numeric_df = statistical_report.get("numeric_descriptives", pd.DataFrame())
+        stats_iv_freq_df = statistical_report.get("independent_frequencies", pd.DataFrame())
+        stats_outcome_freq_df = statistical_report.get("outcome_frequencies", pd.DataFrame())
+        stats_corr_df = statistical_report.get("correlations", pd.DataFrame())
+        stats_group_df = statistical_report.get("group_comparisons", pd.DataFrame())
+        stats_cat_assoc_df = statistical_report.get("categorical_associations", pd.DataFrame())
+        stats_models_df = statistical_report.get("predictive_models", pd.DataFrame())
+        stats_feature_df = statistical_report.get("feature_importance", pd.DataFrame())
+        stats_notes_df = statistical_report.get("methodological_notes", pd.DataFrame())
+
+        stats_top_col1, stats_top_col2 = st.columns([1.1, 1])
+        with stats_top_col1:
+            st.markdown("#### Panorama general")
+            st.dataframe(stats_overview_df, use_container_width=True, hide_index=True)
+        with stats_top_col2:
+            st.markdown("#### Advertencias metodológicas")
+            st.dataframe(stats_notes_df, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Descriptivos y tablas de frecuencia")
+        stats_desc_col1, stats_desc_col2, stats_desc_col3 = st.columns([1.1, 1, 1])
+        with stats_desc_col1:
+            if stats_numeric_df.empty:
+                st.info("No hay variables numéricas suficientes para resumir en esta muestra filtrada.")
+            else:
+                display_numeric_df = stats_numeric_df.copy()
+                display_numeric_df["variable"] = display_numeric_df["variable"].map(analysis_label)
+                st.dataframe(display_numeric_df, use_container_width=True, hide_index=True)
+        with stats_desc_col2:
+            if stats_iv_freq_df.empty:
+                st.info("No hay frecuencias independientes disponibles.")
+            else:
+                display_iv_freq = stats_iv_freq_df.copy()
+                display_iv_freq["variable"] = display_iv_freq["variable"].map(analysis_label)
+                st.dataframe(display_iv_freq, use_container_width=True, hide_index=True)
+        with stats_desc_col3:
+            if stats_outcome_freq_df.empty:
+                st.info("No hay frecuencias de resultados disponibles.")
+            else:
+                display_outcome_freq = stats_outcome_freq_df.copy()
+                display_outcome_freq["variable"] = display_outcome_freq["variable"].map(analysis_label)
+                st.dataframe(display_outcome_freq, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Correlaciones y asociaciones")
+        stats_assoc_col1, stats_assoc_col2 = st.columns([1, 1])
+        with stats_assoc_col1:
+            if stats_corr_df.empty:
+                st.info("No hay suficientes pares numéricos para estimar correlaciones estables.")
+            else:
+                corr_heatmap = make_statistical_heatmap(
+                    stats_corr_df,
+                    x_col="predictor",
+                    y_col="outcome",
+                    value_col="statistic",
+                    title="Mapa de correlaciones entre contexto y resultados",
+                    colorbar_title="r",
+                )
+                render_plotly_figure(
+                    corr_heatmap,
+                    "heatmap_correlaciones_contexto",
+                    data_df=stats_corr_df.assign(
+                        predictor=stats_corr_df["predictor"].map(analysis_label),
+                        outcome=stats_corr_df["outcome"].map(analysis_label),
+                    ),
+                    caption="Spearman se usa por defecto en variables ordinales o no normales; Pearson solo cuando los datos son compatibles con ese supuesto.",
+                )
+        with stats_assoc_col2:
+            if stats_cat_assoc_df.empty:
+                st.info("No hay asociaciones categóricas con variación suficiente para chi-cuadrado.")
+            else:
+                cat_heatmap = make_statistical_heatmap(
+                    stats_cat_assoc_df,
+                    x_col="predictor",
+                    y_col="outcome",
+                    value_col="cramers_v",
+                    title="Fuerza de asociación entre variables categóricas",
+                    colorbar_title="V de Cramer",
+                )
+                render_plotly_figure(
+                    cat_heatmap,
+                    "heatmap_asociaciones_categoricas",
+                    data_df=stats_cat_assoc_df.assign(
+                        predictor=stats_cat_assoc_df["predictor"].map(analysis_label),
+                        outcome=stats_cat_assoc_df["outcome"].map(analysis_label),
+                    ),
+                    caption="La prueba chi-cuadrado resume asociación entre variables categóricas; revisa especialmente celdas esperadas pequeñas antes de sobrerrepresentar hallazgos.",
+                )
+
+        stats_detail_col1, stats_detail_col2 = st.columns([1, 1])
+        with stats_detail_col1:
+            st.markdown("#### Comparación entre grupos")
+            if stats_group_df.empty or stats_analysis_df.empty:
+                st.info("No hay combinaciones suficientes para comparar grupos sobre resultados numéricos u ordinales.")
+            else:
+                display_group_df = stats_group_df.copy()
+                display_group_df["group_variable"] = display_group_df["group_variable"].map(analysis_label)
+                display_group_df["outcome"] = display_group_df["outcome"].map(analysis_label)
+                st.dataframe(display_group_df, use_container_width=True, hide_index=True)
+                available_group_pairs = stats_group_df[["group_variable", "outcome"]].drop_duplicates()
+                pair_labels = available_group_pairs.apply(
+                    lambda row: f"{analysis_label(row['outcome'])} según {analysis_label(row['group_variable'])}",
+                    axis=1,
+                ).tolist()
+                selected_pair = st.selectbox("Visualización de diferencias", options=pair_labels)
+                pair_row = available_group_pairs.iloc[pair_labels.index(selected_pair)]
+                comparison_fig = make_group_comparison_boxplot(stats_analysis_df, pair_row["group_variable"], pair_row["outcome"])
+                render_plotly_figure(
+                    comparison_fig,
+                    f"comparacion_{pair_row['group_variable']}_{pair_row['outcome']}",
+                    data_df=stats_analysis_df[[pair_row["group_variable"], pair_row["outcome"]]].copy(),
+                    caption="La elección entre Mann-Whitney, Kruskal-Wallis, t-test o ANOVA depende del tipo de resultado y de la forma empírica de la distribución observada.",
+                )
+        with stats_detail_col2:
+            st.markdown("#### Asociaciones entre categóricas")
+            if stats_cat_assoc_df.empty or stats_analysis_df.empty:
+                st.info("No hay cruces categóricos suficientes para mostrar composición porcentual estable.")
+            else:
+                display_assoc_df = stats_cat_assoc_df.copy()
+                display_assoc_df["predictor"] = display_assoc_df["predictor"].map(analysis_label)
+                display_assoc_df["outcome"] = display_assoc_df["outcome"].map(analysis_label)
+                st.dataframe(display_assoc_df, use_container_width=True, hide_index=True)
+                available_assoc_pairs = stats_cat_assoc_df[["predictor", "outcome"]].drop_duplicates()
+                assoc_labels = available_assoc_pairs.apply(
+                    lambda row: f"{analysis_label(row['outcome'])} por {analysis_label(row['predictor'])}",
+                    axis=1,
+                ).tolist()
+                selected_assoc = st.selectbox("Visualización categórica", options=assoc_labels)
+                assoc_row = available_assoc_pairs.iloc[assoc_labels.index(selected_assoc)]
+                assoc_fig = make_categorical_association_chart(stats_analysis_df, assoc_row["predictor"], assoc_row["outcome"])
+                render_plotly_figure(
+                    assoc_fig,
+                    f"asociacion_{assoc_row['predictor']}_{assoc_row['outcome']}",
+                    data_df=stats_analysis_df[[assoc_row["predictor"], assoc_row["outcome"]]].dropna().copy(),
+                    caption="La lectura debe centrarse en asociación y composición relativa observada; no implica trayectorias causales entre contexto y razonamiento moral.",
+                )
+
+        st.markdown("#### Modelos exploratorios de predicción")
+        if stats_models_df.empty:
+            st.info("La muestra filtrada aún no tiene tamaño o balance suficientes para modelos multivariables exploratorios estables.")
+        else:
+            display_models_df = stats_models_df.copy()
+            display_models_df["target"] = display_models_df["target"].map(analysis_label)
+            st.dataframe(display_models_df, use_container_width=True, hide_index=True)
+            if not stats_feature_df.empty:
+                available_targets = stats_feature_df["target"].dropna().astype(str).unique().tolist()
+                selected_target = st.selectbox("Importancia de variables para", options=available_targets, format_func=analysis_label)
+                importance_fig = make_feature_importance_bar(stats_feature_df, selected_target)
+                render_plotly_figure(
+                    importance_fig,
+                    f"importancia_variables_{selected_target}",
+                    data_df=stats_feature_df[stats_feature_df["target"] == selected_target].copy(),
+                    caption="La importancia en bosques aleatorios señala utilidad relativa dentro del modelo exploratorio, no relevancia causal ni prioridad normativa.",
+                )
+
+        st.markdown("#### Exportación estadística")
+        st.download_button(
+            "Descargar paquete estadístico (Excel)",
+            data=dataframe_to_excel_bytes({
+                "base_analitica": stats_analysis_df,
+                "descriptivos": stats_numeric_df,
+                "frecuencias_indep": stats_iv_freq_df,
+                "frecuencias_result": stats_outcome_freq_df,
+                "correlaciones": stats_corr_df,
+                "comparacion_grupos": stats_group_df,
+                "asoc_categoricas": stats_cat_assoc_df,
+                "modelos": stats_models_df,
+                "importancia": stats_feature_df,
+                "notas_metodo": stats_notes_df,
+            }),
+            file_name="paquete_estadistico_exploratorio.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
 
 def page_deployment() -> None:

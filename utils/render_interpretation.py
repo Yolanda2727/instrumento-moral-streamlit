@@ -42,6 +42,30 @@ def _interpretation_to_markdown(result: Dict[str, Any]) -> str:
         "## Resumen ejecutivo",
         str(result.get("resumen_ejecutivo", "")),
         "",
+        "## Hallazgos descriptivos",
+    ]
+    for item in result.get("hallazgos_descriptivos", []):
+        lines.append(f"- {item}")
+    lines.extend([
+        "",
+        "## Asociaciones observadas",
+    ])
+    for item in result.get("asociaciones_observadas", []):
+        lines.append(f"- {item}")
+    lines.extend([
+        "",
+        "## Correlaciones relevantes",
+    ])
+    for item in result.get("correlaciones_relevantes", []):
+        lines.append(f"- {item}")
+    lines.extend([
+        "",
+        "## Advertencias metodológicas",
+    ])
+    for item in result.get("advertencias_metodologicas", []):
+        lines.append(f"- {item}")
+    lines.extend([
+        "",
         "## Interpretación ética",
         str(result.get("interpretacion_etica", "")),
         "",
@@ -51,8 +75,14 @@ def _interpretation_to_markdown(result: Dict[str, Any]) -> str:
         "## Interpretación bioética",
         str(result.get("interpretacion_bioetica", "")),
         "",
+        "## Riesgos de sobreinterpretación",
+    ])
+    for item in result.get("riesgos_sobreinterpretacion", []):
+        lines.append(f"- {item}")
+    lines.extend([
+        "",
         "## Riesgos y alertas",
-    ]
+    ])
     for risk in result.get("riesgos", []):
         lines.append(
             f"- {risk.get('riesgo', '')} | Nivel: {risk.get('nivel', '')} | {risk.get('descripcion', '')}"
@@ -86,9 +116,14 @@ def _interpretation_to_markdown(result: Dict[str, Any]) -> str:
 def _interpretation_to_csv_bytes(result: Dict[str, Any]) -> bytes:
     rows = [
         {"seccion": "resumen_ejecutivo", "contenido": result.get("resumen_ejecutivo", "")},
+        {"seccion": "hallazgos_descriptivos", "contenido": json.dumps(result.get("hallazgos_descriptivos", []), ensure_ascii=False)},
+        {"seccion": "asociaciones_observadas", "contenido": json.dumps(result.get("asociaciones_observadas", []), ensure_ascii=False)},
+        {"seccion": "correlaciones_relevantes", "contenido": json.dumps(result.get("correlaciones_relevantes", []), ensure_ascii=False)},
+        {"seccion": "advertencias_metodologicas", "contenido": json.dumps(result.get("advertencias_metodologicas", []), ensure_ascii=False)},
         {"seccion": "interpretacion_etica", "contenido": result.get("interpretacion_etica", "")},
         {"seccion": "interpretacion_legal", "contenido": result.get("interpretacion_legal", "")},
         {"seccion": "interpretacion_bioetica", "contenido": result.get("interpretacion_bioetica", "")},
+        {"seccion": "riesgos_sobreinterpretacion", "contenido": json.dumps(result.get("riesgos_sobreinterpretacion", []), ensure_ascii=False)},
         {"seccion": "consideraciones_clave", "contenido": json.dumps(result.get("consideraciones_clave", []), ensure_ascii=False)},
         {"seccion": "fortalezas_argumentativas", "contenido": json.dumps(result.get("fortalezas_argumentativas", []), ensure_ascii=False)},
         {"seccion": "debilidades_argumentativas", "contenido": json.dumps(result.get("debilidades_argumentativas", []), ensure_ascii=False)},
@@ -142,9 +177,14 @@ def render_interpretation_report(result: Dict[str, Any], title: str) -> None:
     _render_download_buttons(result, title)
 
     _render_text_card("Resumen ejecutivo", result.get("resumen_ejecutivo", "Sin contenido."))
+    _render_list_block("Hallazgos descriptivos", result.get("hallazgos_descriptivos", []))
+    _render_list_block("Asociaciones observadas", result.get("asociaciones_observadas", []))
+    _render_list_block("Correlaciones relevantes", result.get("correlaciones_relevantes", []))
+    _render_list_block("Advertencias metodológicas", result.get("advertencias_metodologicas", []))
     _render_text_card("Interpretación ética", result.get("interpretacion_etica", "Sin contenido."))
     _render_text_card("Interpretación legal", result.get("interpretacion_legal", "Sin contenido."))
     _render_text_card("Interpretación bioética", result.get("interpretacion_bioetica", "Sin contenido."))
+    _render_list_block("Riesgos de sobreinterpretación", result.get("riesgos_sobreinterpretacion", []))
 
     _render_risk_cards(result.get("riesgos", []))
     _render_list_block("Consideraciones clave", result.get("consideraciones_clave", []))

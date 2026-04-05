@@ -21,9 +21,29 @@ INTERPRETATION_JSON_SCHEMA: Dict[str, Any] = {
         "additionalProperties": False,
         "properties": {
             "resumen_ejecutivo": {"type": "string"},
+            "hallazgos_descriptivos": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "asociaciones_observadas": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "correlaciones_relevantes": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "advertencias_metodologicas": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
             "interpretacion_etica": {"type": "string"},
             "interpretacion_legal": {"type": "string"},
             "interpretacion_bioetica": {"type": "string"},
+            "riesgos_sobreinterpretacion": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
             "riesgos": {
                 "type": "array",
                 "items": {
@@ -79,9 +99,14 @@ INTERPRETATION_JSON_SCHEMA: Dict[str, Any] = {
         },
         "required": [
             "resumen_ejecutivo",
+            "hallazgos_descriptivos",
+            "asociaciones_observadas",
+            "correlaciones_relevantes",
+            "advertencias_metodologicas",
             "interpretacion_etica",
             "interpretacion_legal",
             "interpretacion_bioetica",
+            "riesgos_sobreinterpretacion",
             "riesgos",
             "consideraciones_clave",
             "fortalezas_argumentativas",

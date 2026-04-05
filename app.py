@@ -1611,6 +1611,20 @@ def serialize_for_ai(value):
     return value
 
 
+def records_for_ai(df: pd.DataFrame, *, limit: int = 12, label_columns: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
+    if df is None or df.empty:
+        return []
+    export_df = df.head(limit).copy()
+    for column, formatter in (label_columns or {}).items():
+        if column not in export_df.columns:
+            continue
+        export_df[column] = export_df[column].map(formatter)
+    records: List[Dict[str, Any]] = []
+    for row in export_df.to_dict(orient="records"):
+        records.append({key: serialize_for_ai(value) for key, value in row.items()})
+    return records
+
+
 def selected_option_text(item_id: str, choice_key: str) -> str | None:
     dilemma = LOOKUP.get(item_id)
     if not dilemma:
@@ -1687,6 +1701,7 @@ def build_group_ai_payload(
     keyword_df: pd.DataFrame,
     pattern_summary: pd.DataFrame,
     trends_df: pd.DataFrame,
+    statistical_report: Dict[str, pd.DataFrame] | None = None,
 ) -> Dict[str, object]:
     choice_df = df_last_filtered[df_last_filtered["row_type"] == "choice"].copy()
     sample_choices = []
@@ -1707,6 +1722,22 @@ def build_group_ai_payload(
     framework_summary = quantitative_report.get("framework_summary", pd.DataFrame())
     stage_summary = quantitative_report.get("stage_summary", pd.DataFrame())
     descriptive_summary = quantitative_report.get("descriptive_summary", pd.DataFrame())
+    statistical_report = statistical_report or {}
+    correlations_df = statistical_report.get("correlations", pd.DataFrame())
+    group_comparisons_df = statistical_report.get("group_comparisons", pd.DataFrame())
+    categorical_associations_df = statistical_report.get("categorical_associations", pd.DataFrame())
+    predictive_models_df = statistical_report.get("predictive_models", pd.DataFrame())
+    feature_importance_df = statistical_report.get("feature_importance", pd.DataFrame())
+    methodological_notes_df = statistical_report.get("methodological_notes", pd.DataFrame())
+    numeric_descriptives_df = statistical_report.get("numeric_descriptives", pd.DataFrame())
+    outcome_frequencies_df = statistical_report.get("outcome_frequencies", pd.DataFrame())
+    independent_frequencies_df = statistical_report.get("independent_frequencies", pd.DataFrame())
+
+    top_correlations = correlations_df.sort_values("p_value", na_position="last") if not correlations_df.empty else correlations_df
+    top_group_comparisons = group_comparisons_df.sort_values(["p_value", "effect_size"], ascending=[True, False], na_position="last") if not group_comparisons_df.empty else group_comparisons_df
+    top_categorical_associations = categorical_associations_df.sort_values(["p_value", "cramers_v"], ascending=[True, False], na_position="last") if not categorical_associations_df.empty else categorical_associations_df
+    top_predictive_models = predictive_models_df.sort_values(["target", "metric", "mean_score"], ascending=[True, True, False], na_position="last") if not predictive_models_df.empty else predictive_models_df
+    top_feature_importance = feature_importance_df.sort_values("importance", ascending=False, na_position="last") if not feature_importance_df.empty else feature_importance_df
 
     return {
         "tipo_analisis": "grupal",
@@ -1728,6 +1759,17 @@ def build_group_ai_payload(
         "tendencias_profesion": trends_df.to_dict(orient="records"),
         "palabras_clave": keyword_df.to_dict(orient="records"),
         "patrones_argumentativos": pattern_summary.to_dict(orient="records"),
+        "analisis_relacional": {
+            "descriptivos_relacionales": records_for_ai(numeric_descriptives_df, limit=20, label_columns={"variable": analysis_label}),
+            "frecuencias_variables_independientes": records_for_ai(independent_frequencies_df, limit=30, label_columns={"variable": analysis_label}),
+            "frecuencias_resultados": records_for_ai(outcome_frequencies_df, limit=20, label_columns={"variable": analysis_label}),
+            "correlaciones_relevantes": records_for_ai(top_correlations, limit=15, label_columns={"predictor": analysis_label, "outcome": analysis_label}),
+            "comparaciones_entre_grupos": records_for_ai(top_group_comparisons, limit=15, label_columns={"group_variable": analysis_label, "outcome": analysis_label}),
+            "asociaciones_categoricas": records_for_ai(top_categorical_associations, limit=15, label_columns={"predictor": analysis_label, "outcome": analysis_label}),
+            "resultados_predictivos_exploratorios": records_for_ai(top_predictive_models, limit=20, label_columns={"target": analysis_label}),
+            "variables_mas_influyentes": records_for_ai(top_feature_importance, limit=20, label_columns={"target": analysis_label, "feature": feature_label}),
+            "advertencias_metodologicas": records_for_ai(methodological_notes_df, limit=10),
+        },
         "muestra_justificaciones": sample_choices,
     }
 
@@ -2152,25 +2194,33 @@ def page_ai_interpretation(df: pd.DataFrame) -> None:
         if students_filtered.empty:
             st.info("Los filtros actuales no dejan muestra disponible para interpretación grupal.")
         elif st.button("Generar interpretación IA grupal", use_container_width=True):
+            students_filtered_base = students_filtered.drop(columns=["group_filter"], errors="ignore")
+            df_last_filtered_base = df_last_filtered.drop(columns=["group_filter"], errors="ignore")
             quantitative_report = build_quantitative_report(
-                students_filtered.drop(columns=["group_filter"], errors="ignore"),
-                df_last_filtered.drop(columns=["group_filter"], errors="ignore"),
+                students_filtered_base,
+                df_last_filtered_base,
                 FRAMEWORKS,
             )
             keyword_df = extract_keywords_by_group(df_last_filtered, BASE_STOPWORDS, group_col="profession")
             pattern_summary = argumentative_pattern_table(df_last_filtered, BASE_STOPWORDS)
             trends_df = profession_interpretive_trends(
-                students_filtered.drop(columns=["group_filter"], errors="ignore"),
+                students_filtered_base,
                 keyword_df,
                 pattern_summary,
             )
+            statistical_report = build_statistical_report_cached(
+                PERSISTENCE_STORE.backend_detail,
+                students_filtered_base,
+                df_last_filtered_base,
+            )
             payload = build_group_ai_payload(
-                students_filtered.drop(columns=["group_filter"], errors="ignore"),
-                df_last_filtered.drop(columns=["group_filter"], errors="ignore"),
+                students_filtered_base,
+                df_last_filtered_base,
                 quantitative_report,
                 keyword_df,
                 pattern_summary,
                 trends_df,
+                statistical_report,
             )
             try:
                 with st.spinner("Consultando OpenAI para interpretación grupal..."):

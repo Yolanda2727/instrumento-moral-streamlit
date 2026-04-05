@@ -884,10 +884,7 @@ def hedges_g(a: np.ndarray | list, b: np.ndarray | list) -> float:
 
 def route_for_profession(label: str, route_size: int) -> List[dict]:
     route_group = route_group_for_profession(label)
-    effective_size = route_size
-    if route_group in {"bacteriologia_laboratorio", "microbiologia_laboratorio"}:
-        effective_size = max(route_size, 8)
-    ids = ROUTE_BANKS.get(route_group, ["K1", "K2"])[:effective_size]
+    ids = ROUTE_BANKS.get(route_group, ["K1", "K2"])[:route_size]
     return [LOOKUP[item_id] for item_id in ids]
 
 

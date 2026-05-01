@@ -610,7 +610,36 @@ LAB_DILEMMA_CATALOG = [
     {"id": "BM12", "ruta_sugerida": "Microbiología", "foco": "Secuenciación y comunicación de brotes"},
 ]
 
-for item_id, title, prompt, options in health + law + it_cases:
+sp_cases = [
+    (
+        "SP1",
+        "Salud Pública Global: vacunación obligatoria en pandemia",
+        "Durante una pandemia de alta mortalidad, el gobierno propone vacunación obligatoria para frenar la transmisión. Parte de la población se niega por razones religiosas, culturales y de desconfianza institucional. Eres responsable de política pública. ¿Qué postura asumes?",
+        [
+            opt("A", "Impongo la vacunación sin excepciones para acabar rápido con la pandemia.", 1, "utilitarismo"),
+            opt("B", "Obligo a vacunarse si el análisis costo-beneficio muestra que salva más vidas que las libertades que restringe.", 2, "utilitarismo"),
+            opt("C", "Diseño campañas de diálogo y confianza que aborden el miedo antes de considerar cualquier obligación.", 3, "cuidado"),
+            opt("D", "Aplico la normativa vigente de salud pública internacional sin excepciones no contempladas en ley.", 4, "deontologia"),
+            opt("E", "Establezco obligatoriedad con excepciones médicas documentadas, marco legal claro y mecanismos de impugnación.", 5, "contrato_social"),
+            opt("F", "Busco el equilibrio entre protección colectiva, autonomía individual y justicia intercultural, evitando coerción desproporcionada.", 6, "virtudes"),
+        ],
+    ),
+    (
+        "SP2",
+        "Salud Pública Global: distribución inequitativa de vacunas entre países",
+        "Trabajas en un organismo internacional de salud. Los países de altos ingresos acaparan vacunas mientras países de bajos ingresos carecen de dosis suficientes para sus poblaciones más vulnerables. Posees influencia para redirigir parte del suministro. ¿Cómo actúas?",
+        [
+            opt("A", "No intervengo: los contratos ya están firmados y el orden legal debe respetarse.", 1, "deontologia"),
+            opt("B", "Redistribuyo en silencio lo que sea posible sin desafiar abiertamente los contratos.", 2, "utilitarismo"),
+            opt("C", "Priorizo a los países con mayor mortalidad y menor capacidad de respuesta porque lo haría si fuera uno de ellos.", 3, "regla_de_oro"),
+            opt("D", "Activo los mecanismos legales de acceso equitativo previstos en los tratados de salud pública internacional.", 4, "deontologia"),
+            opt("E", "Propongo un acuerdo multilateral transparente que reequilibre el acceso según vulnerabilidad y carga de enfermedad.", 5, "contrato_social"),
+            opt("F", "La justicia global exige que el acceso a vacunas vitales no dependa del poder adquisitivo de los Estados.", 6, "virtudes"),
+        ],
+    ),
+]
+
+for item_id, title, prompt, options in health + law + it_cases + sp_cases:
     BANK.append(make_dilemma(item_id, title, prompt, options, STAGE_TEMPLATE))
 
 for item_id, title, prompt, options, pedagogical_justification in lab_cases:
@@ -631,6 +660,7 @@ PROFESSION_DEFINITIONS = [
     {"label": "TI", "route_group": "ti"},
     {"label": "Datos", "route_group": "datos"},
     {"label": "Otra / Mixta", "route_group": "mixta"},
+    {"label": "Salud Pública Global", "route_group": "salud_publica_global"},
 ]
 
 PROFESSION_OPTIONS = [definition["label"] for definition in PROFESSION_DEFINITIONS]
@@ -652,6 +682,7 @@ ROUTE_BANKS = {
     "ti": ["K1", "K2", "T4", "T6", "T3", "T7", "T8", "T1", "T2", "T5"],
     "datos": ["K1", "K2", "T2", "T3", "T5", "T8", "T6", "T7", "T4", "T1"],
     "mixta": ["K1", "K2", "H1", "L1", "T1", "H4", "L4", "T2"],
+    "salud_publica_global": ["SP1", "SP2", "K1", "K2", "H1", "H5", "H6", "H2", "H3", "H7"],
 }
 
 PROFESSION_ROUTE_GROUPS = {

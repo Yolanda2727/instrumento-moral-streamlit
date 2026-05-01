@@ -4411,38 +4411,6 @@ def page_admin(df: pd.DataFrame) -> None:
                 use_container_width=True,
             )
 
-    st.markdown("### Catálogo de dilemas de laboratorio")
-    st.write("Revisión docente de los casos específicos para Bacteriología y Microbiología.")
-    route_filter = st.multiselect(
-        "Filtrar por ruta sugerida",
-        options=["Bacteriología", "Microbiología", "Bacteriología / Microbiología"],
-        default=["Bacteriología", "Microbiología", "Bacteriología / Microbiología"],
-    )
-    lab_catalog_rows = []
-    for item in LAB_DILEMMA_CATALOG:
-        if route_filter and item["ruta_sugerida"] not in route_filter:
-            continue
-        dilemma = LOOKUP[item["id"]]
-        lab_catalog_rows.append({
-            "id": item["id"],
-            "ruta_sugerida": item["ruta_sugerida"],
-            "foco": item["foco"],
-            "titulo": dilemma["title"],
-            "planteamiento": dilemma["prompt"],
-            "justificacion_pedagogica": dilemma.get("pedagogical_justification", ""),
-        })
-
-    lab_catalog_df = pd.DataFrame(lab_catalog_rows)
-    st.dataframe(lab_catalog_df, use_container_width=True)
-    st.download_button(
-        "Descargar catálogo de dilemas de laboratorio (CSV)",
-        data=lab_catalog_df.to_csv(index=False).encode("utf-8"),
-        file_name="lab_dilemmas_catalog.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-
 def main() -> None:
     ensure_storage()
     render_header()
@@ -4452,7 +4420,7 @@ def main() -> None:
 
     page = st.sidebar.radio(
         "Navegación",
-        ["Presentación del programa", "Aplicación individual", "Dashboard colectivo", "Interpretación IA", "Guía de despliegue", "Administración"],
+        ["Presentación del programa", "Aplicación individual", "Dashboard colectivo", "Interpretación IA", "Administración"],
     )
 
     if page == "Presentación del programa":
@@ -4465,8 +4433,6 @@ def main() -> None:
     elif page == "Interpretación IA":
         if admin_login_panel():
             page_ai_interpretation(df)
-    elif page == "Guía de despliegue":
-        page_deployment()
     else:
         if admin_login_panel():
             page_admin(df)

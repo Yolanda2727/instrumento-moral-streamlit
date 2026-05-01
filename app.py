@@ -100,6 +100,15 @@ PROGRAM_OBJECTIVES = [
 
 LEGACY_CSV_PATH = Path(os.getenv("MORAL_TEST_LEGACY_CSV_PATH", os.getenv("MORAL_TEST_DATA_PATH", "data/responses.csv")))
 SQLITE_PATH = Path(os.getenv("MORAL_TEST_SQLITE_PATH", "data/responses.db"))
+AUTHOR_PHOTO_PATH: Path | None = next(
+    (p for p in [
+        Path("assets/author_photo.jpg"),
+        Path("assets/author_photo.jpeg"),
+        Path("assets/author_photo.png"),
+        Path("assets/author_photo.webp"),
+    ] if p.exists()),
+    None,
+)
 EXPORT_DIR = Path("data/exports")
 PERSISTENCE_STORE = load_persistence_store(sqlite_path=SQLITE_PATH, legacy_csv_path=LEGACY_CSV_PATH)
 ADMIN_REPORT_STORE = load_admin_report_store()
@@ -1505,6 +1514,8 @@ def page_program() -> None:
     st.subheader("Presentación del programa")
     c1, c2 = st.columns([1.1, 1.4])
     with c1:
+        if AUTHOR_PHOTO_PATH is not None:
+            st.image(str(AUTHOR_PHOTO_PATH), use_container_width=True)
         st.markdown(
             f"""
             <div class="author-card">

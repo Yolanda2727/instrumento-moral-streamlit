@@ -239,6 +239,21 @@ class PersistenceStore:
             )
         raise ValueError(f"Consulta no soportada: {query_name}")
 
+    def delete_all_data(self) -> int:
+        """Elimina todos los intentos y respuestas.
+
+        Importante: no se ejecuta automáticamente en ningún flujo; está pensado
+        únicamente para acciones administrativas explícitas.
+        """
+        self.ensure_storage()
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            cursor = conn.cursor()
+            cursor.execute(f"DELETE FROM {ATTEMPTS_TABLE}")
+            deleted = cursor.rowcount if cursor.rowcount is not None else 0
+            conn.commit()
+        return int(deleted)
+
     def _migrate_legacy_csv_if_needed(self) -> None:
         legacy_path = self.config.legacy_csv_path
         if legacy_path is None or not legacy_path.exists():
@@ -542,12 +557,28 @@ def load_persistence_store(
 ) -> PersistenceStore:
     sqlite_path = Path(sqlite_path)
     csv_path = Path(legacy_csv_path) if legacy_csv_path else None
+
     supabase_db_url = (
         os.getenv("SUPABASE_DB_URL")
         or os.getenv("SUPABASE_DATABASE_URL")
         or os.getenv("POSTGRES_URL")
         or os.getenv("DATABASE_URL")
     )
+
+    if not supabase_db_url:
+        try:
+            import streamlit as st
+
+            supabase_db_url = (
+                st.secrets.get("SUPABASE_DB_URL")
+                or st.secrets.get("SUPABASE_DATABASE_URL")
+                or st.secrets.get("POSTGRES_URL")
+                or st.secrets.get("DATABASE_URL")
+            )
+        except Exception:
+            supabase_db_url = None
+
+    supabase_db_url = str(supabase_db_url) if supabase_db_url else None
     backend = "supabase" if supabase_db_url else "sqlite"
     store = PersistenceStore(
         PersistenceConfig(

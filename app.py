@@ -53,6 +53,7 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfVectorizer
 from utils.pdf_export import build_individual_report_pdf
+from utils.docx_export import build_individual_report_docx_bytes
 from utils.render_interpretation import render_interpretation_report
 
 # =========================
@@ -1926,6 +1927,7 @@ def create_individual_report_context(
         "ai_result": None,
         "ai_error": None,
         "pdf_bytes": None,
+        "docx_bytes": None,
         "saved_paths": {},
     }
 
@@ -1962,6 +1964,25 @@ def run_individual_ai_analysis(report_context: Dict[str, object], spinner_text: 
 def rebuild_individual_report_artifacts(report_context: Dict[str, object]) -> Dict[str, object]:
     dominant_framework = framework_label(report_context["fw_dom"]) if report_context.get("fw_dom") else "No definido"
     participant_context_rows = build_context_display_rows(report_context.get("participant_context", {}))
+
+    participant_rows = [
+        ("ID anonimizado", report_context["anon_id"]),
+        ("ID institucional", report_context["student_id"]),
+        ("Nombre o seudónimo", report_context["name"]),
+        ("Profesión", report_context["profession"]),
+        ("Grupo", normalize_group_label(report_context["group"])),
+        ("Años de experiencia", report_context["years_experience"]),
+        ("Ruta profesional", report_context["route_group"]),
+        *participant_context_rows,
+    ]
+    metric_rows = [
+        ("Nivel global", report_context["k_level"]),
+        ("Estadio redondeado", report_context["k_stage"]),
+        ("Índice k_est", report_context["k_est"]),
+        ("Coherencia", report_context["coherence"]),
+        ("Marco dominante", dominant_framework),
+    ]
+
     pdf_bytes = build_individual_report_pdf(
         app_title=APP_TITLE,
         app_brand_line=APP_BRAND_LINE,
@@ -1969,23 +1990,8 @@ def rebuild_individual_report_artifacts(report_context: Dict[str, object]) -> Di
         author_credentials=AUTHOR_CREDENTIALS,
         main_function=MAIN_FUNCTION,
         generated_at=str(report_context["timestamp"]),
-        participant_rows=[
-            ("ID anonimizado", report_context["anon_id"]),
-            ("ID institucional", report_context["student_id"]),
-            ("Nombre o seudónimo", report_context["name"]),
-            ("Profesión", report_context["profession"]),
-            ("Grupo", normalize_group_label(report_context["group"])),
-            ("Años de experiencia", report_context["years_experience"]),
-            ("Ruta profesional", report_context["route_group"]),
-            *participant_context_rows,
-        ],
-        metric_rows=[
-            ("Nivel global", report_context["k_level"]),
-            ("Estadio redondeado", report_context["k_stage"]),
-            ("Índice k_est", report_context["k_est"]),
-            ("Coherencia", report_context["coherence"]),
-            ("Marco dominante", dominant_framework),
-        ],
+        participant_rows=participant_rows,
+        metric_rows=metric_rows,
         narrative_summary=str(report_context["summary_text"]),
         recommendations=report_context["recommendations"],
         framework_scores_df=report_context["framework_score_df"],
@@ -2011,7 +2017,26 @@ def rebuild_individual_report_artifacts(report_context: Dict[str, object]) -> Di
             ),
         ],
     )
+
+    docx_bytes = build_individual_report_docx_bytes(
+        app_title=APP_TITLE,
+        app_brand_line=APP_BRAND_LINE,
+        author_name=AUTHOR_NAME,
+        author_credentials=AUTHOR_CREDENTIALS,
+        main_function=MAIN_FUNCTION,
+        generated_at=str(report_context["timestamp"]),
+        participant_rows=participant_rows,
+        metric_rows=metric_rows,
+        narrative_summary=str(report_context["summary_text"]),
+        recommendations=report_context["recommendations"],
+        framework_scores_df=report_context["framework_score_df"],
+        stage_scores_df=report_context["stage_score_df"],
+        choice_detail_df=report_context["choice_detail_df"],
+        interpretation_result=report_context.get("ai_result"),
+        interpretation_note=report_context.get("ai_error"),
+    )
     report_context["pdf_bytes"] = pdf_bytes
+    report_context["docx_bytes"] = docx_bytes
     report_context["saved_paths"] = ADMIN_REPORT_STORE.save_individual_report(
         timestamp=str(report_context["timestamp"]),
         anon_id=str(report_context["anon_id"]),
@@ -2031,6 +2056,7 @@ def rebuild_individual_report_artifacts(report_context: Dict[str, object]) -> Di
         participant_context=report_context.get("participant_context"),
         ai_interpretation=report_context.get("ai_result"),
         pdf_bytes=pdf_bytes,
+        docx_bytes=docx_bytes,
     )
     return report_context
 
@@ -2059,7 +2085,7 @@ def render_individual_report(report_context: Dict[str, object]) -> None:
                 hide_index=True,
             )
 
-    action_col1, action_col2 = st.columns(2)
+    action_col1, action_col2, action_col3 = st.columns(3)
     retry_label = "Regenerar análisis IA integrado" if report_context.get("ai_result") else "Generar o reintentar análisis IA integrado"
     if action_col1.button(
         retry_label,
@@ -2079,6 +2105,43 @@ def render_individual_report(report_context: Dict[str, object]) -> None:
         data=report_context["pdf_bytes"],
         file_name=f"{export_name}.pdf",
         mime="application/pdf",
+        use_container_width=True,
+    )
+
+    action_col3.download_button(
+        "Descargar reporte en Word (DOCX)",
+        data=report_context.get("docx_bytes") or b"",
+        file_name=f"{export_name}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        use_container_width=True,
+        disabled=not bool(report_context.get("docx_bytes")),
+    )
+
+    st.download_button(
+        "Descargar paquete del reporte (Excel)",
+        data=dataframe_to_excel_bytes({
+            "resumen_metrico": pd.DataFrame([
+                {
+                    "timestamp": report_context["timestamp"],
+                    "anon_id": report_context["anon_id"],
+                    "student_id": report_context["student_id"],
+                    "name": report_context["name"],
+                    "profession": report_context["profession"],
+                    "group": normalize_group_label(report_context["group"]),
+                    "years_experience": report_context["years_experience"],
+                    "k_level": report_context["k_level"],
+                    "k_stage": report_context["k_stage"],
+                    "k_est": report_context["k_est"],
+                    "coherence": report_context["coherence"],
+                    "fw_dom": dominant_framework,
+                }
+            ]),
+            "marcos_eticos": report_context["framework_score_df"],
+            "estadios_morales": report_context["stage_score_df"],
+            "respuestas_detalle": report_context["choice_detail_df"],
+        }),
+        file_name=f"{export_name}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
 
@@ -3775,6 +3838,18 @@ def page_dashboard(df: pd.DataFrame) -> None:
             disabled=exploratory_model_df.empty,
             use_container_width=True,
         )
+
+        st.download_button(
+            "Descargar paquete del dashboard (Excel)",
+            data=dataframe_to_excel_bytes({
+                "students_summary": students_export,
+                "last_attempt_rows": df_last_export,
+                "base_modelado": exploratory_model_df,
+            }),
+            file_name="dashboard_colectivo.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
         st.info(
             f"Los archivos del análisis individual y colectivo también se guardan automáticamente en la carpeta administrativa del servidor: {ADMIN_REPORT_STORE.base_dir}."
         )
@@ -4121,6 +4196,27 @@ def page_admin(df: pd.DataFrame) -> None:
         load_df_cached.clear()
         st.rerun()
 
+    with st.expander("Borrado de datos (solo bajo orden)"):
+        st.warning(
+            "Esta acción es irreversible. Se recomienda exportar (Excel/CSV) antes de borrar. "
+            "La app no borra automáticamente: solo se borra si confirmas aquí."
+        )
+        if PERSISTENCE_STORE.backend_name == "sqlite":
+            st.info(
+                "Backend actual: SQLite local. En despliegues en la nube el disco puede ser efímero; "
+                "para persistencia garantizada configura `SUPABASE_DB_URL` (Supabase/Postgres)."
+            )
+        confirm_text = st.text_input("Escribe BORRAR TODO para habilitar el botón", value="")
+        if st.button(
+            "Eliminar toda la base de datos de respuestas",
+            disabled=confirm_text.strip().upper() != "BORRAR TODO",
+            use_container_width=True,
+        ):
+            deleted = PERSISTENCE_STORE.delete_all_data()
+            load_df_cached.clear()
+            st.success(f"Datos eliminados. Intentos borrados: {deleted}.")
+            st.rerun()
+
     st.markdown("### Consultas persistentes y exportación")
     st.write("Consulta el backend consolidado sin depender del CSV legado y descarga tablas administrativas listas para revisión académica.")
     admin_students, _ = student_table(df)
@@ -4299,11 +4395,19 @@ def page_admin(df: pd.DataFrame) -> None:
             st.info("La consulta seleccionada no devolvió resultados con los filtros actuales.")
         else:
             st.dataframe(query_df, use_container_width=True)
-            st.download_button(
-                "Descargar resultado de la consulta (CSV)",
+            q_export_col1, q_export_col2 = st.columns([1, 1])
+            q_export_col1.download_button(
+                "Descargar resultado (CSV)",
                 data=query_df.to_csv(index=False).encode("utf-8"),
                 file_name=f"{filename_slug(export_name)}.csv",
                 mime="text/csv",
+                use_container_width=True,
+            )
+            q_export_col2.download_button(
+                "Descargar resultado (Excel)",
+                data=dataframe_to_excel_bytes({"resultado": query_df}),
+                file_name=f"{filename_slug(export_name)}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
 

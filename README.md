@@ -37,6 +37,8 @@ Valorar de manera formativa cómo estudiantes y profesionales argumentan frente 
 - Nueva sección de Interpretación IA con lectura individual y grupal apoyada por OpenAI.
 - Exportación en CSV para análisis adicional.
 - Exportación en PDF del reporte individual con identidad del software, interpretación, tablas y gráficas.
+- Exportación en Word (DOCX) del reporte individual.
+- Exportación en Excel (XLSX) de paquetes de datos (reporte individual, dashboard colectivo y consultas administrativas).
 
 ## Alcance
 
@@ -95,9 +97,18 @@ Para implementación institucional real, configura:
 
 ```bash
 export SUPABASE_DB_URL="postgresql://usuario:password@host:5432/postgres"
+
+En **Streamlit Community Cloud**, puedes poner este mismo valor en **Secrets** (recomendado) con la clave `SUPABASE_DB_URL`.
 ```
 
 En **Streamlit Community Cloud**, el disco local sigue siendo efímero. Para uso académico serio, la opción recomendada es Supabase/Postgres.
+
+### Borrado de datos (solo bajo orden)
+
+La app **no borra automáticamente** la información recopilada.
+
+- El borrado total (irreversible) solo está disponible desde **Administración** y exige confirmación explícita.
+- Antes de borrar, se recomienda exportar un respaldo en Excel/CSV.
 
 ## Reportes administrativos
 
@@ -117,6 +128,8 @@ Puedes cambiar la ruta con:
 
 ```bash
 export MORAL_TEST_ADMIN_REPORTS_DIR="/ruta/privada/admin_reports"
+
+En **Streamlit Community Cloud**, también puedes definir `MORAL_TEST_ADMIN_REPORTS_DIR` y `MORAL_TEST_ADMIN_DRIVE_URL` en **Secrets**.
 ```
 
 Si quieres que esos archivos queden en Google Drive, la carpeta de Drive debe estar sincronizada o montada localmente en el servidor. Luego apuntas `MORAL_TEST_ADMIN_REPORTS_DIR` a esa ruta local. Un enlace web de Drive, por sí solo, no permite escritura directa desde la app.

@@ -63,6 +63,7 @@ class AdminReportStore:
         participant_context: Dict[str, Any] | None = None,
         ai_interpretation: Dict[str, Any] | None = None,
         pdf_bytes: bytes | None = None,
+        docx_bytes: bytes | None = None,
     ) -> Dict[str, str]:
         self.ensure_storage()
         report_id = f"{_safe_timestamp(timestamp)}_{_slugify(anon_id)}"
@@ -71,6 +72,7 @@ class AdminReportStore:
         csv_path = report_dir / f"{report_id}_choices.csv"
         interpretation_path = report_dir / f"{report_id}_interpretation.json"
         pdf_path = report_dir / f"{report_id}_report.pdf"
+        docx_path = report_dir / f"{report_id}_report.docx"
 
         payload = {
             "timestamp": timestamp,
@@ -105,6 +107,10 @@ class AdminReportStore:
             pdf_path.write_bytes(pdf_bytes)
             output["pdf"] = str(pdf_path)
 
+        if docx_bytes is not None:
+            docx_path.write_bytes(docx_bytes)
+            output["docx"] = str(docx_path)
+
         return output
 
     def save_collective_snapshot(
@@ -136,8 +142,20 @@ class AdminReportStore:
 
 
 def load_admin_report_store(base_dir: str | Path = "data/admin_reports") -> AdminReportStore:
-    base_path = Path(os.getenv("MORAL_TEST_ADMIN_REPORTS_DIR", str(base_dir)))
+    base_path_value = os.getenv("MORAL_TEST_ADMIN_REPORTS_DIR")
     drive_url = os.getenv("MORAL_TEST_ADMIN_DRIVE_URL")
+
+    if not base_path_value or not drive_url:
+        try:
+            import streamlit as st
+
+            base_path_value = base_path_value or st.secrets.get("MORAL_TEST_ADMIN_REPORTS_DIR")
+            drive_url = drive_url or st.secrets.get("MORAL_TEST_ADMIN_DRIVE_URL")
+        except Exception:
+            pass
+
+    base_path = Path(str(base_path_value) if base_path_value else str(base_dir))
+    drive_url = str(drive_url) if drive_url else None
     store = AdminReportStore(AdminReportConfig(base_dir=base_path, drive_url=drive_url))
     store.ensure_storage()
     return store

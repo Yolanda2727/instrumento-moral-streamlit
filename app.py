@@ -2995,7 +2995,7 @@ def page_apply(df: pd.DataFrame) -> None:
 
     with st.sidebar:
         st.markdown("### Parámetros de aplicación")
-        route_size = st.slider("Número de dilemas por ruta", min_value=4, max_value=10, value=DEFAULT_ROUTE_SIZE, step=1)
+        route_size = st.slider("Número de dilemas por ruta", min_value=2, max_value=10, value=DEFAULT_ROUTE_SIZE, step=1)
         anonymize = st.checkbox("Anonimizar datos personales en el almacenamiento", value=True)
 
     st.info(
